@@ -1,4 +1,7 @@
 mcp>=1.28,<2
 playwright>=1.55,<2
 PyJWT[crypto]>=2.10,<3
-pytest>=8.0
+pytest>=8,<10
+pytest-cov>=6,<8
+pyright>=1.1.400,<2
+ruff>=0.12,<1

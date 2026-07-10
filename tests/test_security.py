@@ -1,11 +1,11 @@
 """Regression tests for the web-facing security boundary."""
 
+import base64
 import importlib
+import json
 import os
 import tempfile
 import unittest
-import base64
-import json
 from pathlib import Path
 
 
@@ -17,15 +17,18 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.workspace.mkdir(parents=True)
         self.snapshots = root / "snapshots"
         self.snapshots.mkdir()
-        os.environ.update({
-            "AUTH_MODE": "disabled",
-            "WORKSPACE_ROOT": str(self.workspace),
-            "WORKSPACE_MAP_PATH": str(root / "missing-workspaces.json"),
-            "SNAPSHOT_ROOT": str(self.snapshots),
-            "AUDIT_ROOT": str(self.snapshots / "audit"),
-            "MEMORY_ROOT": str(self.snapshots / "memory"),
-        })
+        os.environ.update(
+            {
+                "AUTH_MODE": "disabled",
+                "WORKSPACE_ROOT": str(self.workspace),
+                "WORKSPACE_MAP_PATH": str(root / "missing-workspaces.json"),
+                "SNAPSHOT_ROOT": str(self.snapshots),
+                "AUDIT_ROOT": str(self.snapshots / "audit"),
+                "MEMORY_ROOT": str(self.snapshots / "memory"),
+            }
+        )
         import app.server
+
         self.server = importlib.reload(app.server)
 
     def tearDown(self) -> None:
@@ -78,6 +81,26 @@ class SecurityBoundaryTests(unittest.TestCase):
 
         verification = json.loads(self.server.project_verify(["syntax"]))
         self.assertTrue(verification["passed"])
+        self.assertEqual(verification["results"]["syntax"]["status"], "passed")
+
+    def test_requested_unconfigured_verification_suite_fails_clearly(self) -> None:
+        verification = json.loads(self.server.project_verify(["lint"]))
+
+        self.assertFalse(verification["passed"])
+        self.assertEqual(verification["results"]["lint"]["status"], "not_configured")
+        self.assertEqual(verification["results"]["lint"]["commands"], [])
+
+    def test_unknown_verification_suite_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Unknown verification suite"):
+            self.server.project_verify(["imaginary"])
+
+    def test_default_verification_skips_unconfigured_optional_suites(self) -> None:
+        self.server.write_file("requirements.txt", "# marker for Python verification\n")
+        verification = json.loads(self.server.project_verify())
+
+        self.assertTrue(verification["passed"])
+        self.assertIn("syntax", verification["selected_suites"])
+        self.assertNotIn("lint", verification["selected_suites"])
 
     def test_self_improvement_readiness_requires_isolated_workspace(self) -> None:
         readiness = json.loads(self.server.self_improvement_readiness())
@@ -116,11 +139,13 @@ class SecurityBoundaryTests(unittest.TestCase):
             self.server.read_symlink("outside-link.txt")
 
     def test_project_checkpoint_creates_checkpoint_directory(self) -> None:
-        result = json.loads(self.server.project_checkpoint(
-            "Regression checkpoint",
-            ["Continue testing"],
-            {"tests": "pending"},
-        ))
+        result = json.loads(
+            self.server.project_checkpoint(
+                "Regression checkpoint",
+                ["Continue testing"],
+                {"tests": "pending"},
+            )
+        )
 
         checkpoint = self.snapshots / "memory"
         checkpoint_files = list(checkpoint.rglob(f"{result['id']}.json"))
