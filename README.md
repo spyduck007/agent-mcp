@@ -154,7 +154,7 @@ Important mounts:
 - `./config:/config:ro` holds the identity-to-workspace mapping.
 - `./snapshots:/snapshots` stores project snapshots outside the container.
 
-The Docker socket, SSH keys, and host home directory are intentionally not mounted.
+The production MCP service mounts the Docker socket so authenticated deployment tools can inspect and control host Docker. This is root-equivalent host access; keep OAuth credentials protected and do not expose this server beyond trusted users. SSH keys and the host home directory are not mounted.
 
 Important production environment values are in `.env`: `PUBLIC_URL`, `WORKSPACES_DIR`, and the `KEYCLOAK_*` passwords. The server derives the issuer and JWKS endpoint from the public URL and refuses to start in production mode without a valid HTTPS URL.
 

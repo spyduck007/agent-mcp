@@ -3,6 +3,8 @@ services:
     build: .
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
+    group_add:
+      - "${DOCKER_GID:-983}"
     environment:
       AUTH_MODE: required
       MCP_HOST: 0.0.0.0
@@ -19,6 +21,7 @@ services:
       - ${WORKSPACES_DIR:-./workspaces}:/workspaces
       - ./config:/config:ro
       - ./snapshots:/snapshots
+      - /var/run/docker.sock:/var/run/docker.sock
     expose:
       - "8080"
     ports:
