@@ -16,6 +16,10 @@ services:
       WORKSPACE_MAP_PATH: /config/workspaces.json
       SECRET_REFS_PATH: /config/secrets.json
       SNAPSHOT_ROOT: /snapshots
+      AUDIT_ROOT: /snapshots/audit
+      MEMORY_ROOT: /snapshots/memory
+      AGENT_POLICY_PATH: /config/agent-policy.md
+      SELF_IMPROVEMENT_WORKSPACE: ${SELF_IMPROVEMENT_WORKSPACE:-agent-mcp}
       PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
     volumes:
       - ${WORKSPACES_DIR:-./workspaces}:/workspaces
@@ -76,6 +80,8 @@ services:
       KEYCLOAK_MCP_USERNAME: ${KEYCLOAK_MCP_USERNAME:-chatgpt}
       KEYCLOAK_MCP_PASSWORD: ${KEYCLOAK_MCP_PASSWORD:?Set a password for the ChatGPT login}
       KEYCLOAK_CHATGPT_CLIENT_SECRET: ${KEYCLOAK_CHATGPT_CLIENT_SECRET:?Set a client secret for ChatGPT}
+      ENABLE_SELF_IMPROVEMENT_WORKSPACE: ${ENABLE_SELF_IMPROVEMENT_WORKSPACE:-false}
+      SELF_IMPROVEMENT_WORKSPACE: ${SELF_IMPROVEMENT_WORKSPACE:-agent-mcp}
     volumes:
       - ./scripts/bootstrap-keycloak.sh:/bootstrap/bootstrap-keycloak.sh:ro
       - ./config:/config

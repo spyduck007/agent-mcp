@@ -22,3 +22,17 @@ location /mcp {
     proxy_buffering off;
     proxy_read_timeout 3600s;
 }
+
+# OAuth protected-resource metadata. Some remote MCP clients request this relative
+# to /mcp; serve both canonical and path-relative forms.
+location = /.well-known/oauth-protected-resource {
+    proxy_pass http://127.0.0.1:8081/.well-known/oauth-protected-resource;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+
+location = /mcp/.well-known/oauth-protected-resource {
+    proxy_pass http://127.0.0.1:8081/.well-known/oauth-protected-resource;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}

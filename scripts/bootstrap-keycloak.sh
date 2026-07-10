@@ -21,7 +21,7 @@ if ! "$KCADM" get "realms/$REALM" >/dev/null 2>&1; then
   "$KCADM" create realms -s realm="$REALM" -s enabled=true -s displayName="Agent MCP"
 fi
 
-for role in workspace:read workspace:write command:run browser:use network:fetch secrets:use database:use deploy:run; do
+for role in workspace:read workspace:write command:run browser:use network:fetch secrets:use database:use deploy:run github:write; do
   if ! "$KCADM" get "roles/$role" -r "$REALM" >/dev/null 2>&1; then
     "$KCADM" create roles -r "$REALM" -s name="$role"
   fi
@@ -35,7 +35,7 @@ fi
 "$KCADM" add-roles -r "$REALM" --uusername "$USER_NAME" \
   --rolename workspace:read --rolename workspace:write --rolename command:run \
   --rolename browser:use --rolename network:fetch --rolename secrets:use \
-  --rolename database:use --rolename deploy:run
+  --rolename database:use --rolename deploy:run --rolename github:write
 
 USER_ID=$("$KCADM" get users -r "$REALM" -q username="$USER_NAME" | sed -n 's/.*"id" *: *"\([^"]*\)".*/\1/p' | head -n 1)
 if [ -z "$USER_ID" ]; then
@@ -44,6 +44,15 @@ if [ -z "$USER_ID" ]; then
 fi
 if [ -f /config/workspaces.json ]; then
   sed -i "s/KEYCLOAK_MCP_SUBJECT/$USER_ID/g" /config/workspaces.json
+  if [ "${ENABLE_SELF_IMPROVEMENT_WORKSPACE:-false}" = "true" ]; then
+    case "${SELF_IMPROVEMENT_WORKSPACE:-agent-mcp}" in
+      *[!A-Za-z0-9_.-]*|"") echo "Invalid SELF_IMPROVEMENT_WORKSPACE" >&2; exit 1 ;;
+    esac
+    SELF_PATH="/workspaces/${SELF_IMPROVEMENT_WORKSPACE:-agent-mcp}"
+    if ! grep -Fq "\"$SELF_PATH\"" /config/workspaces.json; then
+      sed -i "s#\"$USER_ID\"[[:space:]]*:[[:space:]]*\[#\"$USER_ID\": [\"$SELF_PATH\", #" /config/workspaces.json
+    fi
+  fi
 fi
 
 if ! "$KCADM" get clients -r "$REALM" -q clientId="$CLIENT_ID" | grep -q '"id"'; then
