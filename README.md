@@ -49,7 +49,7 @@ Docker is the recommended way to run this project because the image installs the
 
 ## Web deployment (required for ChatGPT)
 
-This server is deliberately fail-closed. Its normal Compose deployment requires HTTPS, OAuth/OIDC access tokens, and an explicit identity-to-workspace map. It does **not** mount your SSH keys, Docker socket, or home directory.
+This server is deliberately fail-closed. Its normal Compose deployment includes a self-hosted Keycloak OAuth/OIDC provider, HTTPS, and an explicit identity-to-workspace map. It does **not** mount your SSH keys, Docker socket, or home directory.
 
 1. Point a public DNS name at this machine and copy the environment template:
 
@@ -59,16 +59,27 @@ mkdir -p config workspaces snapshots
 cp config/workspaces.example.json config/workspaces.json
 ```
 
-2. Edit `.env` with the public domain and your OAuth/OIDC issuer, access-token audience, and JWKS URL. Configure that issuer to mint JWT access tokens containing a stable `sub` claim and these scopes as appropriate:
+2. Edit `.env` with your public domain and five long random passwords. Keycloak is self-hosted in this Compose stack; no third-party OAuth account or endpoints are needed. Generate passwords with:
+
+```bash
+openssl rand -base64 32
+```
+
+The bootstrap service creates a `chatgpt` login user (or the username set in `KEYCLOAK_MCP_USERNAME`) and grants it these roles:
 
    - `workspace:read`
    - `workspace:write`
    - `command:run`
    - `browser:use`
    - `network:fetch`
-   - `admin:install` (only for the package-install tools)
 
-3. Edit `config/workspaces.json`, replacing each example subject with the exact `sub` from the identity provider. Every listed path must be inside `/workspaces` in the container, so use paths such as `/workspaces/alice-project`.
+3. The provided `config/workspaces.example.json` already contains the deterministic Keycloak subject for the bootstrap user. Create its project directory:
+
+```bash
+mkdir -p workspaces/chatgpt-project
+```
+
+Every listed workspace path must remain inside `/workspaces` in the container.
 
 4. Start it:
 
@@ -77,7 +88,27 @@ docker compose --profile production up -d --build
 docker compose --profile production logs -f
 ```
 
-Caddy obtains and renews the TLS certificate once `MCP_DOMAIN` resolves publicly. Add `https://your-domain.example/mcp` as a remote streaming-HTTP MCP app in ChatGPT Developer mode, then complete the OAuth flow. ChatGPT supports remote streaming HTTP MCP servers and OAuth authentication. [OpenAI’s setup guide](https://developers.openai.com/api/docs/guides/developer-mode#how-to-use)
+Caddy obtains and renews the TLS certificate once `MCP_DOMAIN` resolves publicly. Keycloak is available at `https://your-domain.example/auth`; it issues and signs the JWTs validated by the MCP server.
+
+### ChatGPT setup
+
+In ChatGPT Developer mode, add a remote streaming-HTTP MCP app with:
+
+| Field | Value |
+| --- | --- |
+| Server URL | `https://your-domain.example/mcp` |
+| Authentication | OAuth |
+| Client registration | Static |
+| Client ID | `chatgpt-agent-mcp` |
+| Client secret | Leave empty |
+| Token endpoint auth method | `none` |
+| Authorization URL | `https://your-domain.example/auth/realms/agent-mcp/protocol/openid-connect/auth` |
+| Token URL | `https://your-domain.example/auth/realms/agent-mcp/protocol/openid-connect/token` |
+| Scopes | `openid profile` |
+
+When ChatGPT opens the login page, sign in with `KEYCLOAK_MCP_USERNAME` and `KEYCLOAK_MCP_PASSWORD` from `.env`. If ChatGPT displays a specific callback URL, add that exact URL to the client redirect URIs in Keycloak Admin Console (`/auth/admin`); the bootstrap configuration already permits standard `chatgpt.com` callback paths.
+
+ChatGPT supports remote streaming HTTP MCP servers and OAuth authentication. [OpenAI’s setup guide](https://developers.openai.com/api/docs/guides/developer-mode#how-to-use)
 
 For local-only development, run with `AUTH_MODE=disabled` only on a loopback-bound port. Never use that mode on an internet-accessible server.
 
@@ -125,7 +156,7 @@ Important mounts:
 
 The Docker socket, SSH keys, and host home directory are intentionally not mounted.
 
-Important production environment values are in `.env`: `PUBLIC_URL`, `OIDC_ISSUER`, `OIDC_AUDIENCE`, `OIDC_JWKS_URL`, and `WORKSPACES_DIR`. The server refuses to start in production mode without the OAuth values.
+Important production environment values are in `.env`: `PUBLIC_URL`, `WORKSPACES_DIR`, and the `KEYCLOAK_*` passwords. The server derives the issuer and JWKS endpoint from the public URL and refuses to start in production mode without a valid HTTPS URL.
 
 ## Local Development
 

@@ -1,3 +1,9 @@
 {$MCP_DOMAIN} {
-    reverse_proxy mcp-server:8080
+    handle /auth/* {
+        reverse_proxy keycloak:8080
+    }
+
+    handle {
+        reverse_proxy mcp-server:8080
+    }
 }

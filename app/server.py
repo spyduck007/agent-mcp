@@ -30,32 +30,38 @@ except ImportError:  # pragma: no cover - clearer startup error below
 AUTH_MODE = os.getenv("AUTH_MODE", "required").lower()
 WORKSPACE_ROOT = Path(os.getenv("WORKSPACE_ROOT", "/workspaces")).resolve()
 WORKSPACE_MAP_PATH = Path(os.getenv("WORKSPACE_MAP_PATH", "/config/workspaces.json"))
-OIDC_ISSUER = os.getenv("OIDC_ISSUER", "").rstrip("/")
-OIDC_AUDIENCE = os.getenv("OIDC_AUDIENCE", "")
-OIDC_JWKS_URL = os.getenv("OIDC_JWKS_URL", "")
 PUBLIC_URL = os.getenv("PUBLIC_URL", "")
+KEYCLOAK_REALM = os.getenv("KEYCLOAK_REALM", "agent-mcp")
+OIDC_ISSUER = os.getenv("OIDC_ISSUER", f"{PUBLIC_URL.rstrip('/')}/auth/realms/{KEYCLOAK_REALM}").rstrip("/")
+OIDC_AUDIENCE = os.getenv("OIDC_AUDIENCE", "")
+OIDC_CLIENT_ID = os.getenv("OIDC_CLIENT_ID", "chatgpt-agent-mcp")
+OIDC_JWKS_URL = os.getenv("OIDC_JWKS_URL", f"{OIDC_ISSUER}/protocol/openid-connect/certs")
 
 
 class OidcTokenVerifier(TokenVerifier):
     """Validate JWT access tokens issued by the configured OAuth/OIDC provider."""
 
-    def __init__(self, issuer: str, audience: str, jwks_url: str) -> None:
+    def __init__(self, issuer: str, audience: str, client_id: str, jwks_url: str) -> None:
         if jwt is None:
             raise RuntimeError("PyJWT is required when AUTH_MODE=required")
         self.issuer = issuer
         self.audience = audience
+        self.client_id = client_id
         self.jwks = jwt.PyJWKClient(jwks_url, cache_keys=True)
 
     async def verify_token(self, token: str) -> AccessToken | None:
         try:
             signing_key = self.jwks.get_signing_key_from_jwt(token).key
+            decode_options: dict[str, Any] = {"require": ["exp", "iss", "sub"]}
+            if not self.audience:
+                decode_options["verify_aud"] = False
             claims = jwt.decode(
                 token,
                 signing_key,
                 algorithms=["RS256", "ES256", "PS256"],
-                audience=self.audience,
+                audience=self.audience or None,
                 issuer=self.issuer,
-                options={"require": ["exp", "iss", "sub"]},
+                options=decode_options,
             )
         except Exception:
             return None
@@ -65,6 +71,11 @@ class OidcTokenVerifier(TokenVerifier):
         subject = claims.get("sub")
         if not isinstance(subject, str) or not subject:
             return None
+        if self.client_id and claims.get("azp") != self.client_id:
+            return None
+        realm_roles = claims.get("realm_access", {}).get("roles", [])
+        if isinstance(realm_roles, list):
+            scopes.extend(str(role) for role in realm_roles)
         return AccessToken(
             token=token,
             client_id=str(claims.get("azp", claims.get("client_id", "unknown"))),
@@ -82,7 +93,7 @@ def _auth_settings() -> tuple[AuthSettings | None, TokenVerifier | None]:
         raise RuntimeError("AUTH_MODE must be 'required' or 'disabled'")
     missing = [name for name, value in {
         "OIDC_ISSUER": OIDC_ISSUER,
-        "OIDC_AUDIENCE": OIDC_AUDIENCE,
+        "OIDC_CLIENT_ID": OIDC_CLIENT_ID,
         "OIDC_JWKS_URL": OIDC_JWKS_URL,
         "PUBLIC_URL": PUBLIC_URL,
     }.items() if not value]
@@ -90,7 +101,7 @@ def _auth_settings() -> tuple[AuthSettings | None, TokenVerifier | None]:
         raise RuntimeError(f"Refusing to start without OAuth configuration: {', '.join(missing)}")
     return (
         AuthSettings(issuer_url=OIDC_ISSUER, resource_server_url=PUBLIC_URL, required_scopes=[]),
-        OidcTokenVerifier(OIDC_ISSUER, OIDC_AUDIENCE, OIDC_JWKS_URL),
+        OidcTokenVerifier(OIDC_ISSUER, OIDC_AUDIENCE, OIDC_CLIENT_ID, OIDC_JWKS_URL),
     )
 
 

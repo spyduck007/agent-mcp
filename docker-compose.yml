@@ -8,9 +8,8 @@ services:
       MCP_HOST: 0.0.0.0
       MCP_PORT: 8080
       PUBLIC_URL: ${PUBLIC_URL:?Set the public HTTPS MCP URL, e.g. https://mcp.example.com}
-      OIDC_ISSUER: ${OIDC_ISSUER:?Set your OAuth/OIDC issuer URL}
-      OIDC_AUDIENCE: ${OIDC_AUDIENCE:?Set the access-token audience for this MCP}
-      OIDC_JWKS_URL: ${OIDC_JWKS_URL:?Set the issuer JWKS URL}
+      KEYCLOAK_REALM: agent-mcp
+      OIDC_CLIENT_ID: chatgpt-agent-mcp
       WORKSPACE_ROOT: /workspaces
       WORKSPACE_MAP_PATH: /config/workspaces.json
       SNAPSHOT_ROOT: /snapshots
@@ -38,6 +37,57 @@ services:
       - caddy_data:/data
       - caddy_config:/config
 
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    profiles: ["production"]
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?Set a database password}
+    volumes:
+      - keycloak_postgres:/var/lib/postgresql/data
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.6.4
+    restart: unless-stopped
+    profiles: ["production"]
+    depends_on:
+      - postgres
+    environment:
+      KC_DB: postgres
+      KC_DB_URL_HOST: postgres
+      KC_DB_URL_DATABASE: keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?Set a database password}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:-mcp-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?Set a Keycloak admin password}
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HTTP_RELATIVE_PATH: /auth
+      KC_HOSTNAME: ${PUBLIC_URL:?Set the public HTTPS MCP URL, e.g. https://mcp.example.com}/auth
+      KC_HOSTNAME_STRICT: "true"
+      KC_HEALTH_ENABLED: "true"
+    command: start
+    expose:
+      - "8080"
+
+  keycloak-bootstrap:
+    image: quay.io/keycloak/keycloak:26.6.4
+    restart: "no"
+    profiles: ["production"]
+    depends_on:
+      - keycloak
+    environment:
+      KEYCLOAK_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:-mcp-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?Set a Keycloak admin password}
+      KEYCLOAK_MCP_USERNAME: ${KEYCLOAK_MCP_USERNAME:-chatgpt}
+      KEYCLOAK_MCP_PASSWORD: ${KEYCLOAK_MCP_PASSWORD:?Set a password for the ChatGPT login}
+    volumes:
+      - ./scripts/bootstrap-keycloak.sh:/bootstrap/bootstrap-keycloak.sh:ro
+    entrypoint: ["/bin/sh", "/bootstrap/bootstrap-keycloak.sh"]
+
 volumes:
   caddy_data:
   caddy_config:
+  keycloak_postgres:

@@ -1,4 +1,3 @@
 {
-  "oidc-subject-for-alice": ["/workspaces/alice-project"],
-  "oidc-subject-for-bob": ["/workspaces/bob-project"]
+  "00000000-0000-4000-8000-000000000001": ["/workspaces/chatgpt-project"]
 }
