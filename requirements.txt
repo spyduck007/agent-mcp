@@ -1,3 +1,4 @@
 mcp>=1.28,<2
 playwright>=1.55,<2
 PyJWT[crypto]>=2.10,<3
+pytest>=8.0
