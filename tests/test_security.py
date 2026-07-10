@@ -22,6 +22,8 @@ class SecurityBoundaryTests(unittest.TestCase):
             "WORKSPACE_ROOT": str(self.workspace),
             "WORKSPACE_MAP_PATH": str(root / "missing-workspaces.json"),
             "SNAPSHOT_ROOT": str(self.snapshots),
+            "AUDIT_ROOT": str(self.snapshots / "audit"),
+            "MEMORY_ROOT": str(self.snapshots / "memory"),
         })
         import app.server
         self.server = importlib.reload(app.server)
@@ -62,6 +64,24 @@ class SecurityBoundaryTests(unittest.TestCase):
         result = json.loads(self.server.run_command_advanced(["python", "-c", "print('argv-ok')"]))
         self.assertEqual(result["exit_code"], 0)
         self.assertEqual(result["stdout"].strip(), "argv-ok")
+
+    def test_project_context_memory_and_verification(self) -> None:
+        self.server.write_file("requirements.txt", "# marker for Python verification\n")
+        context = json.loads(self.server.project_context())
+        self.assertTrue(context["markers"]["python"])
+        self.assertIn("syntax", context["verification_suites"])
+
+        saved = json.loads(self.server.project_memory_set("architecture", "Use isolated workspaces."))
+        self.assertIn("architecture", saved["memory_keys"])
+        memory = json.loads(self.server.project_memory_get("architecture"))
+        self.assertEqual(memory["entry"]["value"], "Use isolated workspaces.")
+
+        verification = json.loads(self.server.project_verify(["syntax"]))
+        self.assertTrue(verification["passed"])
+
+    def test_self_improvement_readiness_requires_isolated_workspace(self) -> None:
+        readiness = json.loads(self.server.self_improvement_readiness())
+        self.assertFalse(readiness["is_isolated_self_workspace"])
 
 
 if __name__ == "__main__":

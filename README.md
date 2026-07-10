@@ -17,7 +17,10 @@ The server is implemented with `FastMCP` and runs over streamable HTTP at `/mcp`
 - Keep persistent browser sessions across multiple MCP calls.
 - Create, restore, and list local project snapshots.
 - Install Debian, Python, and Node packages in the running container.
-- Report environment and project metadata.
+- Report grounded project context, stack markers, verification commands, and durable project memory.
+- Keep credential-free audit events and resumable work checkpoints per authenticated identity.
+- Run Compose deployment preflight, user-gated apply, health checks, and snapshot-backed rollback.
+- Push a branch and create GitHub pull requests with an ephemeral named token reference.
 
 ## Repository Layout
 
@@ -49,7 +52,7 @@ Docker is the recommended way to run this project because the image installs the
 
 ## Web deployment (required for ChatGPT)
 
-This server is deliberately fail-closed. Its normal Compose deployment includes a self-hosted Keycloak OAuth/OIDC provider, HTTPS, and an explicit identity-to-workspace map. It does **not** mount your SSH keys, Docker socket, or home directory.
+This server is deliberately fail-closed. Its normal Compose deployment includes a self-hosted Keycloak OAuth/OIDC provider, HTTPS, and an explicit identity-to-workspace map. It does **not** mount SSH keys or the host home directory. The production deployment intentionally mounts the Docker socket for authenticated deployment tools; that is root-equivalent host access.
 
 1. Point a public DNS name at this machine and copy the environment template:
 
@@ -72,6 +75,10 @@ The bootstrap service creates a `chatgpt` login user (or the username set in `KE
    - `command:run`
    - `browser:use`
    - `network:fetch`
+   - `secrets:use`
+   - `database:use`
+   - `deploy:run`
+   - `github:write`
 
 3. The Keycloak bootstrap service replaces `KEYCLOAK_MCP_SUBJECT` in `config/workspaces.json` with the actual subject of the configured login user. Create its project directory:
 
@@ -88,7 +95,7 @@ docker compose --profile production up -d --build
 docker compose --profile production logs -f
 ```
 
-The production stack binds the MCP server to `127.0.0.1:8081` and Keycloak to `127.0.0.1:8082`. Put an existing HTTPS Nginx reverse proxy in front of them: proxy `/mcp` to `8081` and `/auth/` to `8082` without stripping the `/auth` prefix. Copy the locations from [nginx/mcp.locations.conf.example](nginx/mcp.locations.conf.example) into the existing HTTPS server block, then validate and reload Nginx. Keycloak is then available at `https://your-domain.example/auth`; it issues and signs the JWTs validated by the MCP server.
+The production stack binds the MCP server to `127.0.0.1:8081` and Keycloak to `127.0.0.1:8082`. Put an existing HTTPS Nginx reverse proxy in front of them: proxy `/mcp` to `8081` and `/auth/` to `8082` without stripping the `/auth` prefix. Copy the locations from [nginx/mcp.locations.conf.example](nginx/mcp.locations.conf.example) into the existing HTTPS server block, including the protected-resource metadata routes, then validate and reload Nginx. Keycloak is then available at `https://your-domain.example/auth`; it issues and signs the JWTs validated by the MCP server.
 
 ### ChatGPT setup
 
@@ -111,6 +118,59 @@ When ChatGPT opens the login page, sign in with `KEYCLOAK_MCP_USERNAME` and `KEY
 ChatGPT supports remote streaming HTTP MCP servers and OAuth authentication. [OpenAI’s setup guide](https://developers.openai.com/api/docs/guides/developer-mode#how-to-use)
 
 For local-only development, run with `AUTH_MODE=disabled` only on a loopback-bound port. Never use that mode on an internet-accessible server.
+
+## Controlled self-improvement setup
+
+The agent improves this MCP from an isolated clone under `/workspaces/agent-mcp`, never from the live deployment checkout. The clone contains no `.env`, Keycloak data, Docker volumes, or host credentials.
+
+After this version is deployed, run these host commands from the repository root:
+
+```bash
+./scripts/setup-self-improvement-workspace.sh
+cp config/secrets.example.json config/secrets.json
+chmod 600 config/secrets.json
+```
+
+Create a **fine-grained GitHub token** for this repository only, with `Contents: Read and write` and `Pull requests: Read and write`. Put it in the ignored `config/secrets.json` as the `GITHUB_TOKEN` value. Do not put it in `.env`, the project clone, a prompt, or a ChatGPT configuration field.
+
+Then opt in to the dedicated workspace in the ignored `.env`:
+
+```text
+ENABLE_SELF_IMPROVEMENT_WORKSPACE=true
+SELF_IMPROVEMENT_WORKSPACE=agent-mcp
+```
+
+Apply the change and grant the existing Keycloak user the new `github:write` role:
+
+```bash
+docker compose --profile production up -d --build
+# The bootstrap service is one-shot, so recreate it explicitly after changing .env.
+docker compose --profile production up -d --force-recreate keycloak-bootstrap
+docker compose --profile production restart mcp-server
+```
+
+Disconnect and reconnect the ChatGPT MCP app once after this step so its access token contains the new role. The ChatGPT OAuth fields and scopes remain unchanged: use only `openid profile`.
+
+In ChatGPT, start a self-improvement task with:
+
+```text
+Open the agent-mcp project workspace. First call self_improvement_readiness and project_context.
+Create a new agent/<short-description> branch. Inspect before editing. Implement the requested change,
+run project_verify, inspect git diff, create a project_checkpoint, then push the branch and open a PR.
+Never merge or deploy unless I explicitly provide the approval phrase requested by the deployment tool.
+```
+
+The policy at `config/agent-policy.md` is supplied in `project_context`. It requires branch/PR workflow, grounded verification, no secret disclosure, and explicit user approval for deployment or rollback. You may customize the policy, but never store secrets in it.
+
+### High-level agent tools
+
+- `project_context`: grounded stack, root files, Git state, verification suites, policy, and memory keys.
+- `project_verify`: fixed syntax/test/lint/typecheck/build/Compose checks with structured evidence.
+- `project_memory_set` / `project_memory_get`: durable project decisions outside the repository.
+- `project_checkpoint` / `audit_events`: resumable work state and credential-free action history.
+- `self_improvement_readiness`: verifies the isolated clone and reports remaining prerequisites.
+- `deployment_preflight`, `deployment_apply`, `deployment_rollback`: Compose validation, snapshot-backed recovery, and explicit approval gates.
+- `github_push_branch`, `github_create_pull_request`: ephemeral-token GitHub workflow. Tokens are never written to Git config or returned in tool output.
 
 ## Local-only development
 
@@ -193,6 +253,13 @@ By default, the server binds to `0.0.0.0:8080` and serves MCP traffic at `/mcp`.
 - `pwd`
 - `get_project_info`
 - `environment_info`
+- `project_context`
+- `project_memory_set`
+- `project_memory_get`
+- `project_checkpoint`
+- `project_verify`
+- `self_improvement_readiness`
+- `audit_events`
 
 ### File and Search Tools
 
@@ -314,6 +381,11 @@ By default, the server binds to `0.0.0.0:8080` and serves MCP traffic at `/mcp`.
 - `compose_logs`
 - `compose_restart`
 - `wait_for_http_health`
+- `deployment_preflight`
+- `deployment_apply`
+- `deployment_rollback`
+- `github_push_branch`
+- `github_create_pull_request`
 
 ## Browser Action Format
 
@@ -381,7 +453,7 @@ Snapshots are stored under `/snapshots` in the container and mapped to `./snapsh
 
 ## Security Notes
 
-This server is intentionally powerful. OAuth scopes restrict tools, but `command:run` permits arbitrary commands within the mounted workspace. Give that scope only to identities you trust. Do not add the Docker socket, SSH keys, or broad host mounts unless you deliberately accept their host-level consequences.
+This server is intentionally powerful. OAuth scopes restrict tools, but `command:run` permits arbitrary commands within the mounted workspace, and the mounted Docker socket is root-equivalent host access. Give these roles only to identities you trust. Keep SSH keys and broad host mounts out of the container. Use the isolated self-improvement clone and the policy/PR workflow for changes to this MCP.
 
 Review the host paths in `docker-compose.yml` before sharing or deploying this project. The defaults are tailored to the original development machine and may expose more of the host filesystem than you want.
 

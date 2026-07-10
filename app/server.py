@@ -12,6 +12,7 @@ import base64
 import difflib
 import socket
 import ssl
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 from collections.abc import Iterable
 from collections import deque
@@ -128,6 +129,10 @@ mcp = FastMCP(
 )
 
 SNAPSHOT_ROOT = Path(os.getenv("SNAPSHOT_ROOT", "/snapshots")).resolve()
+AUDIT_ROOT = Path(os.getenv("AUDIT_ROOT", "/snapshots/audit")).resolve()
+MEMORY_ROOT = Path(os.getenv("MEMORY_ROOT", "/snapshots/memory")).resolve()
+AGENT_POLICY_PATH = Path(os.getenv("AGENT_POLICY_PATH", "/config/agent-policy.md"))
+SELF_IMPROVEMENT_WORKSPACE = os.getenv("SELF_IMPROVEMENT_WORKSPACE", "agent-mcp")
 
 PROCESS_LOG_LIMIT = 5000
 BROWSER_LOG_LIMIT = 500
@@ -202,7 +207,7 @@ def _identity() -> tuple[str, set[str]]:
     token = get_access_token()
     if token is None:
         if AUTH_MODE == "disabled":
-            return "local-dev", {"workspace:read", "workspace:write", "command:run", "browser:use", "network:fetch", "admin:install", "secrets:use", "database:use", "deploy:run"}
+            return "local-dev", {"workspace:read", "workspace:write", "command:run", "browser:use", "network:fetch", "admin:install", "secrets:use", "database:use", "deploy:run", "github:write"}
         raise PermissionError("OAuth authentication is required")
     if not token.subject:
         raise PermissionError("OAuth token has no subject")
@@ -240,6 +245,36 @@ def user_snapshot_root() -> Path:
     root = SNAPSHOT_ROOT / hashlib.sha256(subject).hexdigest()[:24]
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def _identity_storage_root(base: Path) -> Path:
+    """Return a per-identity directory outside project worktrees."""
+    subject = session_state().subject.encode("utf-8")
+    root = base / hashlib.sha256(subject).hexdigest()[:24]
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _json_result(data: Any) -> str:
+    return json.dumps(data, indent=2, sort_keys=True, default=str)
+
+
+def _audit(event: str, details: dict[str, Any]) -> None:
+    """Write a bounded, credential-free audit record for high-level agent actions."""
+    try:
+        entry = {
+            "at": datetime.now(timezone.utc).isoformat(),
+            "subject": session_state().subject,
+            "project": session_state().current_project_name,
+            "event": event,
+            "details": details,
+        }
+        target = _identity_storage_root(AUDIT_ROOT) / "events.jsonl"
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, sort_keys=True, default=str) + "\n")
+    except Exception:
+        # An audit-volume failure must never turn a safe read operation into an outage.
+        pass
 
 
 def set_current_project(name: str, path: Path) -> None:
@@ -1983,6 +2018,278 @@ def restore_snapshot(snapshot_id: str) -> str:
 def list_snapshots() -> str:
     require_scope("workspace:read")
     return "\n".join(sorted(path.name for path in user_snapshot_root().iterdir() if path.is_dir()))
+
+
+def _run_argv(argv: list[str], cwd: Path, timeout_seconds: int = 300) -> dict[str, Any]:
+    """Run a fixed argv command and return bounded structured output."""
+    try:
+        result = subprocess.run(argv, cwd=cwd, text=True, capture_output=True, timeout=timeout_seconds)
+        return {"argv": argv, "exit_code": result.returncode, "timed_out": False, "stdout": result.stdout[:MAX_OUTPUT], "stderr": result.stderr[:MAX_OUTPUT]}
+    except subprocess.TimeoutExpired as exc:
+        return {"argv": argv, "exit_code": None, "timed_out": True, "stdout": (exc.stdout or "")[:MAX_OUTPUT], "stderr": (exc.stderr or "")[:MAX_OUTPUT]}
+
+
+def _project_memory_file() -> Path:
+    state = session_state()
+    digest = hashlib.sha256(str(state.current_project).encode("utf-8")).hexdigest()[:24]
+    return _identity_storage_root(MEMORY_ROOT) / f"{digest}.json"
+
+
+def _load_project_memory() -> dict[str, Any]:
+    target = _project_memory_file()
+    if not target.exists():
+        return {}
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_project_memory(memory: dict[str, Any]) -> None:
+    target = _project_memory_file()
+    temporary = target.with_suffix(".tmp")
+    temporary.write_text(json.dumps(memory, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(target)
+
+
+def _project_markers(root: Path) -> dict[str, bool]:
+    return {
+        "git": (root / ".git").exists(),
+        "python": (root / "pyproject.toml").exists() or (root / "requirements.txt").exists(),
+        "node": (root / "package.json").exists(),
+        "docker": (root / "Dockerfile").exists(),
+        "compose": (root / "docker-compose.yml").exists() or (root / "compose.yml").exists(),
+        "tests": (root / "tests").exists() or (root / "test").exists(),
+        "readme": (root / "README.md").exists(),
+    }
+
+
+def _verification_commands(root: Path) -> dict[str, list[list[str]]]:
+    commands: dict[str, list[list[str]]] = {"syntax": [], "test": [], "lint": [], "typecheck": [], "build": [], "compose": []}
+    if (root / "pyproject.toml").exists() or (root / "requirements.txt").exists():
+        commands["syntax"].append(["python", "-m", "compileall", "-q", "."])
+    if (root / "tests").exists() or (root / "pytest.ini").exists() or (root / "pyproject.toml").exists():
+        commands["test"].append(["python", "-m", "pytest", "-q"])
+    if (root / "package.json").exists():
+        for suite in ("test", "lint", "typecheck", "build"):
+            commands[suite].append(["npm", "run", "--if-present", suite])
+    if (root / "docker-compose.yml").exists() or (root / "compose.yml").exists():
+        commands["compose"].append(["docker", "compose", "config", "--quiet"])
+    return commands
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def project_context(max_files: int = 120) -> str:
+    """Return grounded project context: detected stack, root files, Git state, available verification suites, stored notes, and the active safety policy."""
+    require_scope("workspace:read")
+    root = session_state().current_project
+    markers = _project_markers(root)
+    root_files = sorted(path.name for path in root.iterdir())[:min(max(max_files, 1), 500)]
+    git = _run_argv(["git", "status", "--short", "--branch"], root, 30) if markers["git"] else None
+    package_scripts: list[str] = []
+    if (root / "package.json").exists():
+        try:
+            package_scripts = sorted(json.loads((root / "package.json").read_text(encoding="utf-8")).get("scripts", {}).keys())
+        except (OSError, json.JSONDecodeError, AttributeError):
+            package_scripts = []
+    policy = AGENT_POLICY_PATH.read_text(encoding="utf-8")[:12_000] if AGENT_POLICY_PATH.exists() else "No policy file configured."
+    memory = _load_project_memory()
+    return _json_result({
+        "project": session_state().current_project_name,
+        "path": str(root),
+        "markers": markers,
+        "root_files": root_files,
+        "git": git,
+        "package_scripts": package_scripts,
+        "verification_suites": {name: commands for name, commands in _verification_commands(root).items() if commands},
+        "memory_keys": sorted(memory),
+        "policy": policy,
+    })
+
+
+@mcp.tool()
+def project_memory_set(key: str, value: str) -> str:
+    """Persist a concise, user-approved project fact or decision outside the repository. Never store credentials or tokens here."""
+    require_scope("workspace:write")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,80}", key):
+        raise ValueError("Memory key may contain only letters, digits, '.', '_' and '-'")
+    if len(value) > 12_000:
+        raise ValueError("Memory values are limited to 12,000 characters")
+    memory = _load_project_memory()
+    memory[key] = {"updated_at": datetime.now(timezone.utc).isoformat(), "value": value}
+    _save_project_memory(memory)
+    _audit("project_memory_set", {"key": key, "characters": len(value)})
+    return _json_result({"saved": key, "memory_keys": sorted(memory)})
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def project_memory_get(key: Optional[str] = None) -> str:
+    """Read one persistent project memory entry, or list available memory keys."""
+    require_scope("workspace:read")
+    memory = _load_project_memory()
+    if key is None:
+        return _json_result({"memory_keys": sorted(memory)})
+    if key not in memory:
+        raise KeyError(f"No memory entry named {key}")
+    return _json_result({"key": key, "entry": memory[key]})
+
+
+@mcp.tool()
+def project_checkpoint(summary: str, next_steps: list[str], verification: Optional[dict[str, Any]] = None) -> str:
+    """Create a durable progress checkpoint outside the repository for long-running agent work."""
+    require_scope("workspace:write")
+    if len(summary) > 12_000 or len(next_steps) > 50:
+        raise ValueError("Checkpoint is too large")
+    root = _identity_storage_root(MEMORY_ROOT) / "checkpoints"
+    checkpoint_id = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
+    payload = {"id": checkpoint_id, "at": datetime.now(timezone.utc).isoformat(), "project": str(session_state().current_project), "summary": summary, "next_steps": next_steps, "verification": verification or {}}
+    (root / f"{checkpoint_id}.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _audit("project_checkpoint", {"checkpoint_id": checkpoint_id, "next_step_count": len(next_steps)})
+    return _json_result(payload)
+
+
+@mcp.tool()
+def project_verify(suites: Optional[list[str]] = None, timeout_seconds: int = 300) -> str:
+    """Run detected fixed verification suites (syntax, test, lint, typecheck, build, compose) and return grounded pass/fail evidence."""
+    require_scope("command:run")
+    root = session_state().current_project
+    available = _verification_commands(root)
+    selected = suites or [name for name, commands in available.items() if commands]
+    allowed = set(available)
+    if unknown := set(selected) - allowed:
+        raise ValueError(f"Unknown verification suite(s): {', '.join(sorted(unknown))}")
+    results: dict[str, list[dict[str, Any]]] = {}
+    timeout = min(max(timeout_seconds, 1), 600)
+    for suite in selected:
+        results[suite] = [_run_argv(command, root, timeout) for command in available[suite]]
+    passed = all(item["exit_code"] == 0 and not item["timed_out"] for items in results.values() for item in items)
+    payload = {"project": str(root), "selected_suites": selected, "passed": passed, "results": results}
+    _audit("project_verify", {"suites": selected, "passed": passed})
+    return _json_result(payload)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def self_improvement_readiness() -> str:
+    """Assess whether the active project is the isolated self-improvement checkout and report the branch, policy, verification, and credential prerequisites."""
+    require_scope("workspace:read")
+    root = session_state().current_project
+    is_self_workspace = root.name == SELF_IMPROVEMENT_WORKSPACE
+    markers = _project_markers(root)
+    git = _run_argv(["git", "status", "--short", "--branch"], root, 30) if markers["git"] else None
+    origin = _run_argv(["git", "remote", "get-url", "origin"], root, 30) if markers["git"] else None
+    return _json_result({
+        "ready": is_self_workspace and markers["git"] and AGENT_POLICY_PATH.exists(),
+        "is_isolated_self_workspace": is_self_workspace,
+        "expected_workspace_name": SELF_IMPROVEMENT_WORKSPACE,
+        "git": git,
+        "origin": origin,
+        "verification_suites": [name for name, commands in _verification_commands(root).items() if commands],
+        "github_pr_requirement": "Configure a fine-grained GitHub token as GITHUB_TOKEN in /config/secrets.json, then use github_push_branch and github_create_pull_request.",
+        "deployment_requirement": "Use deployment_preflight and require explicit user approval before deployment_apply or deployment_rollback.",
+        "policy_present": AGENT_POLICY_PATH.exists(),
+    })
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def audit_events(max_entries: int = 100) -> str:
+    """Return recent credential-free audit records for the authenticated identity."""
+    require_scope("workspace:read")
+    target = _identity_storage_root(AUDIT_ROOT) / "events.jsonl"
+    if not target.exists():
+        return _json_result({"events": []})
+    lines = target.read_text(encoding="utf-8", errors="replace").splitlines()[-min(max(max_entries, 1), 1000):]
+    return _json_result({"events": [json.loads(line) for line in lines if line.strip()]})
+
+
+@mcp.tool()
+def deployment_preflight(cwd: str = ".") -> str:
+    """Validate a Compose project before deployment: configuration, current service state, and a snapshot identifier for rollback."""
+    require_scope("deploy:run")
+    require_scope("workspace:write")
+    root = resolve_path(cwd)
+    if not ((root / "docker-compose.yml").exists() or (root / "compose.yml").exists()):
+        raise FileNotFoundError("No docker-compose.yml or compose.yml in the selected project")
+    config = _run_argv(["docker", "compose", "config", "--quiet"], root, 120)
+    status = _run_argv(["docker", "compose", "ps", "--all"], root, 60)
+    snapshot = create_snapshot(f"predeploy-{int(time.time())}")
+    payload = {"project": str(root), "config": config, "status": status, "snapshot": snapshot, "ready": config["exit_code"] == 0}
+    _audit("deployment_preflight", {"project": str(root), "ready": payload["ready"]})
+    return _json_result(payload)
+
+
+@mcp.tool()
+def deployment_apply(approval: str, services: Optional[list[str]] = None, health_url: Optional[str] = None, cwd: str = ".") -> str:
+    """Build and apply a Compose deployment. Requires the exact user approval phrase I_APPROVE_DEPLOYMENT and optional HTTP health evidence."""
+    require_scope("deploy:run")
+    require_scope("workspace:write")
+    if approval != "I_APPROVE_DEPLOYMENT":
+        raise PermissionError("Deployment requires explicit user approval: I_APPROVE_DEPLOYMENT")
+    root = resolve_path(cwd)
+    service_args = services or []
+    if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,80}", service) for service in service_args):
+        raise ValueError("Invalid Compose service name")
+    preflight = _run_argv(["docker", "compose", "config", "--quiet"], root, 120)
+    if preflight["exit_code"] != 0:
+        return _json_result({"deployed": False, "preflight": preflight})
+    result = _run_argv(["docker", "compose", "up", "--build", "--detach", *service_args], root, 600)
+    health = json.loads(wait_for_http_health(health_url)) if health_url and result["exit_code"] == 0 else None
+    payload = {"deployed": result["exit_code"] == 0 and (health is None or health.get("healthy") is True), "preflight": preflight, "apply": result, "health": health}
+    _audit("deployment_apply", {"project": str(root), "services": service_args, "deployed": payload["deployed"]})
+    return _json_result(payload)
+
+
+@mcp.tool()
+def deployment_rollback(snapshot_id: str, approval: str, cwd: str = ".") -> str:
+    """Restore a pre-deployment snapshot and re-apply Compose. Requires exact user approval I_APPROVE_ROLLBACK."""
+    require_scope("deploy:run")
+    require_scope("workspace:write")
+    if approval != "I_APPROVE_ROLLBACK":
+        raise PermissionError("Rollback requires explicit user approval: I_APPROVE_ROLLBACK")
+    restore = restore_snapshot(snapshot_id)
+    root = resolve_path(cwd)
+    result = _run_argv(["docker", "compose", "up", "--build", "--detach"], root, 600)
+    payload = {"restored": restore, "apply": result, "rolled_back": result["exit_code"] == 0}
+    _audit("deployment_rollback", {"project": str(root), "snapshot_id": snapshot_id, "rolled_back": payload["rolled_back"]})
+    return _json_result(payload)
+
+
+@mcp.tool()
+def github_push_branch(branch: str, secret_ref: str = "GITHUB_TOKEN", cwd: str = ".") -> str:
+    """Push a branch using an ephemeral fine-grained GitHub token reference; the token is never persisted in Git config or returned."""
+    require_scope("github:write")
+    require_scope("workspace:write")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./-]{0,180}", branch):
+        raise ValueError("Invalid branch name")
+    token = _secret_values([secret_ref])[secret_ref]
+    root = resolve_path(cwd)
+    auth = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+    result = _run_argv(["git", "-c", f"http.https://github.com/.extraheader=AUTHORIZATION: Basic {auth}", "push", "--set-upstream", "origin", branch], root, 300)
+    safe_result = dict(result)
+    safe_result["argv"] = ["git", "push", "--set-upstream", "origin", branch]
+    _audit("github_push_branch", {"branch": branch, "exit_code": result["exit_code"]})
+    return _json_result({"branch": branch, "result": safe_result, "secret_ref_used": secret_ref})
+
+
+@mcp.tool()
+def github_create_pull_request(repository: str, head: str, title: str, body: str, base: str = "main", secret_ref: str = "GITHUB_TOKEN") -> str:
+    """Create a GitHub pull request with an ephemeral fine-grained token. Requires repository format owner/name and github:write."""
+    require_scope("github:write")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise ValueError("repository must be owner/name")
+    token = _secret_values([secret_ref])[secret_ref]
+    payload = json.dumps({"title": title[:256], "head": head, "base": base, "body": body[:60_000]}).encode("utf-8")
+    request = urllib.request.Request(f"https://api.github.com/repos/{repository}/pulls", data=payload, method="POST", headers={"Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}", "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            result = json.loads(response.read(200_000).decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        result = {"status": exc.code, "error": exc.read(100_000).decode("utf-8", errors="replace")}
+        _audit("github_create_pull_request", {"repository": repository, "head": head, "status": exc.code})
+        return _json_result(result)
+    safe = {key: result.get(key) for key in ("number", "html_url", "state", "title", "head", "base")}
+    _audit("github_create_pull_request", {"repository": repository, "head": head, "number": result.get("number")})
+    return _json_result(safe)
 
 
 @mcp.tool()
