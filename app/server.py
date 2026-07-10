@@ -379,11 +379,12 @@ def close_project(name: str) -> str:
     if name not in state.projects:
         raise ValueError(f"Unknown project: {name}")
 
+    if name == state.current_project_name and len(state.projects) == 1:
+        raise ValueError("Cannot close the last workspace project")
+
     del state.projects[name]
 
     if name == state.current_project_name:
-        if not state.projects:
-            raise ValueError("Cannot close the last workspace project")
         state.current_project_name, state.current_project = next(iter(state.projects.items()))
 
     return f"Closed project: {name}"
@@ -2142,6 +2143,7 @@ def project_checkpoint(summary: str, next_steps: list[str], verification: Option
     if len(summary) > 12_000 or len(next_steps) > 50:
         raise ValueError("Checkpoint is too large")
     root = _identity_storage_root(MEMORY_ROOT) / "checkpoints"
+    root.mkdir(parents=True, exist_ok=True)
     checkpoint_id = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
     payload = {"id": checkpoint_id, "at": datetime.now(timezone.utc).isoformat(), "project": str(session_state().current_project), "summary": summary, "next_steps": next_steps, "verification": verification or {}}
     (root / f"{checkpoint_id}.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -2620,11 +2622,23 @@ def create_symlink(target: str, link_path: str) -> str:
 @mcp.tool(annotations={"readOnlyHint": True})
 def read_symlink(path: str) -> str:
     """Return a symbolic link target after validating that it remains in the workspace."""
-    link = resolve_path(path)
+    require_scope("workspace:read")
+    state = session_state()
+    raw = Path(path).expanduser()
+    candidate = raw if raw.is_absolute() else state.current_project / raw
+
+    # Resolve the parent to enforce workspace confinement without following the
+    # final path component, which must remain a symlink for inspection.
+    link = candidate.parent.resolve() / candidate.name
+    roots = _workspace_map().get(state.subject, [])
+    if not _is_allowed_path(link, roots):
+        raise PermissionError("Path is outside the assigned workspace")
     if not link.is_symlink():
         raise ValueError("Path is not a symbolic link")
+
     resolved = link.resolve()
-    resolve_path(str(resolved))
+    if not _is_allowed_path(resolved, roots):
+        raise PermissionError("Symbolic link target is outside the assigned workspace")
     return _format_browser_result({"path": str(link), "link_target": str(link.readlink()), "resolved_target": str(resolved)})
 
 
