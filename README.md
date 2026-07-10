@@ -6,7 +6,7 @@ The server is implemented with `FastMCP` and runs over streamable HTTP at `/mcp`
 
 ## Features
 
-- Open and switch between host project directories.
+- Open and switch between assigned workspace directories.
 - Read, write, append, patch, move, copy, delete, and search files.
 - Run one-off shell commands with timeouts.
 - Start, inspect, wait on, stop, and forget long-running background processes.
@@ -73,23 +73,23 @@ cp config/workspaces.example.json config/workspaces.json
 4. Start it:
 
 ```bash
-docker compose up -d --build
-docker compose logs -f
+docker compose --profile production up -d --build
+docker compose --profile production logs -f
 ```
 
 Caddy obtains and renews the TLS certificate once `MCP_DOMAIN` resolves publicly. Add `https://your-domain.example/mcp` as a remote streaming-HTTP MCP app in ChatGPT Developer mode, then complete the OAuth flow. ChatGPT supports remote streaming HTTP MCP servers and OAuth authentication. [OpenAI’s setup guide](https://developers.openai.com/api/docs/guides/developer-mode#how-to-use)
 
 For local-only development, run with `AUTH_MODE=disabled` only on a loopback-bound port. Never use that mode on an internet-accessible server.
 
-## Legacy local quick start
+## Local-only development
 
 Build and run the MCP server:
 
 ```bash
-docker compose up --build
+docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 ```
 
-The production compose file publishes Caddy on HTTPS. The legacy direct endpoint was:
+This override binds the insecure development server to loopback only:
 
 ```text
 http://localhost:8081/mcp
@@ -111,7 +111,7 @@ The server name is:
 coding-agent-mcp
 ```
 
-Exact MCP client configuration differs by client. Use streamable HTTP as the transport and the URL above as the endpoint.
+For ChatGPT web, use the HTTPS URL from the web-deployment section. The loopback URL is for local development only.
 
 ## Docker Compose Details
 
@@ -125,14 +125,7 @@ Important mounts:
 
 The Docker socket, SSH keys, and host home directory are intentionally not mounted.
 
-Important environment values:
-
-- `HOME=/host` makes agent shell commands use the mounted host tree as home.
-- `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright` uses the Chromium install baked into the image.
-- `GIT_SSH_COMMAND` selects the mounted SSH key and accepts new host keys.
-- `NO_PROXY`/`no_proxy` keep localhost and host gateway traffic local.
-
-If you use this project on another machine, update the host-specific paths in `docker-compose.yml` before running it.
+Important production environment values are in `.env`: `PUBLIC_URL`, `OIDC_ISSUER`, `OIDC_AUDIENCE`, `OIDC_JWKS_URL`, and `WORKSPACES_DIR`. The server refuses to start in production mode without the OAuth values.
 
 ## Local Development
 
