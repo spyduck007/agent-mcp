@@ -23,6 +23,9 @@ build/
 
 snapshots/
 screenshots/
+workspaces/
+config/workspaces.json
+.env
 
 .DS_Store
 Thumbs.db

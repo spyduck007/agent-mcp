@@ -1,0 +1,3 @@
+{$MCP_DOMAIN} {
+    reverse_proxy mcp-server:8080
+}

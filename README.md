@@ -1,6 +1,6 @@
 # Agent MCP
 
-Agent MCP is a containerized Model Context Protocol (MCP) server for coding agents. It exposes a project-oriented toolset for file editing, shell commands, long-running process management, Git helpers, HTTP fetches, browser inspection with Playwright, package installation, and project snapshots.
+Agent MCP is a containerized Model Context Protocol (MCP) server for ChatGPT on the web. It exposes a project-oriented toolset for file editing, shell commands, long-running process management, Git helpers, browser inspection with Playwright, and project snapshots.
 
 The server is implemented with `FastMCP` and runs over streamable HTTP at `/mcp`.
 
@@ -47,7 +47,41 @@ For local Python usage:
 
 Docker is the recommended way to run this project because the image installs the tools the MCP server exposes to agents, including Git, Docker CLI, Node, npm, pnpm, Yarn, Go, Rust, Java, ripgrep, SQLite, PostgreSQL client tools, and Chromium for Playwright.
 
-## Quick Start
+## Web deployment (required for ChatGPT)
+
+This server is deliberately fail-closed. Its normal Compose deployment requires HTTPS, OAuth/OIDC access tokens, and an explicit identity-to-workspace map. It does **not** mount your SSH keys, Docker socket, or home directory.
+
+1. Point a public DNS name at this machine and copy the environment template:
+
+```bash
+cp .env.example .env
+mkdir -p config workspaces snapshots
+cp config/workspaces.example.json config/workspaces.json
+```
+
+2. Edit `.env` with the public domain and your OAuth/OIDC issuer, access-token audience, and JWKS URL. Configure that issuer to mint JWT access tokens containing a stable `sub` claim and these scopes as appropriate:
+
+   - `workspace:read`
+   - `workspace:write`
+   - `command:run`
+   - `browser:use`
+   - `network:fetch`
+   - `admin:install` (only for the package-install tools)
+
+3. Edit `config/workspaces.json`, replacing each example subject with the exact `sub` from the identity provider. Every listed path must be inside `/workspaces` in the container, so use paths such as `/workspaces/alice-project`.
+
+4. Start it:
+
+```bash
+docker compose up -d --build
+docker compose logs -f
+```
+
+Caddy obtains and renews the TLS certificate once `MCP_DOMAIN` resolves publicly. Add `https://your-domain.example/mcp` as a remote streaming-HTTP MCP app in ChatGPT Developer mode, then complete the OAuth flow. ChatGPT supports remote streaming HTTP MCP servers and OAuth authentication. [OpenAI’s setup guide](https://developers.openai.com/api/docs/guides/developer-mode#how-to-use)
+
+For local-only development, run with `AUTH_MODE=disabled` only on a loopback-bound port. Never use that mode on an internet-accessible server.
+
+## Legacy local quick start
 
 Build and run the MCP server:
 
@@ -55,7 +89,7 @@ Build and run the MCP server:
 docker compose up --build
 ```
 
-The compose file maps the MCP server to:
+The production compose file publishes Caddy on HTTPS. The legacy direct endpoint was:
 
 ```text
 http://localhost:8081/mcp
@@ -85,11 +119,11 @@ The included `docker-compose.yml` starts one service named `mcp-server`.
 
 Important mounts:
 
-- `/home/anshagrawal:/host` exposes the host workspace tree inside the container.
-- `./app:/app/app` enables live editing of the server source while developing.
+- `./workspaces:/workspaces` is the only project tree exposed to the service.
+- `./config:/config:ro` holds the identity-to-workspace mapping.
 - `./snapshots:/snapshots` stores project snapshots outside the container.
-- `/var/run/docker.sock:/var/run/docker.sock` lets tools inside the container talk to the host Docker daemon.
-- `/home/anshagrawal/.ssh:/root/.ssh:ro` exposes SSH credentials read-only for Git operations.
+
+The Docker socket, SSH keys, and host home directory are intentionally not mounted.
 
 Important environment values:
 
@@ -279,7 +313,7 @@ Snapshots are stored under `/snapshots` in the container and mapped to `./snapsh
 
 ## Security Notes
 
-This server is intentionally powerful. It can read and write mounted files, run shell commands, install packages, access the Docker socket, use mounted SSH credentials, and automate browsers. Run it only in trusted environments and expose the MCP endpoint only to trusted clients.
+This server is intentionally powerful. OAuth scopes restrict tools, but `command:run` permits arbitrary commands within the mounted workspace. Give that scope only to identities you trust. Do not add the Docker socket, SSH keys, or broad host mounts unless you deliberately accept their host-level consequences.
 
 Review the host paths in `docker-compose.yml` before sharing or deploying this project. The defaults are tailored to the original development machine and may expose more of the host filesystem than you want.
 

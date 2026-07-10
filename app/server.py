@@ -7,6 +7,8 @@ import subprocess
 import threading
 import time
 import uuid
+import hashlib
+from collections.abc import Iterable
 from collections import deque
 from dataclasses import dataclass, field
 import urllib.request
@@ -15,20 +17,100 @@ from pathlib import Path
 from typing import Any, Optional
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.auth.middleware.auth_context import get_access_token
+from mcp.server.auth.provider import AccessToken, TokenVerifier
+from mcp.server.auth.settings import AuthSettings
+
+try:
+    import jwt
+except ImportError:  # pragma: no cover - clearer startup error below
+    jwt = None
+
+
+AUTH_MODE = os.getenv("AUTH_MODE", "required").lower()
+WORKSPACE_ROOT = Path(os.getenv("WORKSPACE_ROOT", "/workspaces")).resolve()
+WORKSPACE_MAP_PATH = Path(os.getenv("WORKSPACE_MAP_PATH", "/config/workspaces.json"))
+OIDC_ISSUER = os.getenv("OIDC_ISSUER", "").rstrip("/")
+OIDC_AUDIENCE = os.getenv("OIDC_AUDIENCE", "")
+OIDC_JWKS_URL = os.getenv("OIDC_JWKS_URL", "")
+PUBLIC_URL = os.getenv("PUBLIC_URL", "")
+
+
+class OidcTokenVerifier(TokenVerifier):
+    """Validate JWT access tokens issued by the configured OAuth/OIDC provider."""
+
+    def __init__(self, issuer: str, audience: str, jwks_url: str) -> None:
+        if jwt is None:
+            raise RuntimeError("PyJWT is required when AUTH_MODE=required")
+        self.issuer = issuer
+        self.audience = audience
+        self.jwks = jwt.PyJWKClient(jwks_url, cache_keys=True)
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        try:
+            signing_key = self.jwks.get_signing_key_from_jwt(token).key
+            claims = jwt.decode(
+                token,
+                signing_key,
+                algorithms=["RS256", "ES256", "PS256"],
+                audience=self.audience,
+                issuer=self.issuer,
+                options={"require": ["exp", "iss", "sub"]},
+            )
+        except Exception:
+            return None
+
+        raw_scopes = claims.get("scope", claims.get("scp", []))
+        scopes = raw_scopes.split() if isinstance(raw_scopes, str) else list(raw_scopes or [])
+        subject = claims.get("sub")
+        if not isinstance(subject, str) or not subject:
+            return None
+        return AccessToken(
+            token=token,
+            client_id=str(claims.get("azp", claims.get("client_id", "unknown"))),
+            scopes=[str(scope) for scope in scopes],
+            expires_at=int(claims["exp"]),
+            subject=subject,
+            claims=claims,
+        )
+
+
+def _auth_settings() -> tuple[AuthSettings | None, TokenVerifier | None]:
+    if AUTH_MODE == "disabled":
+        return None, None
+    if AUTH_MODE != "required":
+        raise RuntimeError("AUTH_MODE must be 'required' or 'disabled'")
+    missing = [name for name, value in {
+        "OIDC_ISSUER": OIDC_ISSUER,
+        "OIDC_AUDIENCE": OIDC_AUDIENCE,
+        "OIDC_JWKS_URL": OIDC_JWKS_URL,
+        "PUBLIC_URL": PUBLIC_URL,
+    }.items() if not value]
+    if missing:
+        raise RuntimeError(f"Refusing to start without OAuth configuration: {', '.join(missing)}")
+    return (
+        AuthSettings(issuer_url=OIDC_ISSUER, resource_server_url=PUBLIC_URL, required_scopes=[]),
+        OidcTokenVerifier(OIDC_ISSUER, OIDC_AUDIENCE, OIDC_JWKS_URL),
+    )
+
+
+AUTH_SETTINGS, TOKEN_VERIFIER = _auth_settings()
 
 mcp = FastMCP(
     "coding-agent-mcp",
-    host="0.0.0.0",
-    port=8080,
+    instructions=(
+        "Use read tools to inspect before changing files. Keep all paths inside the assigned workspace. "
+        "Use write tools only after the user has requested a change; never use destructive actions or commands "
+        "unless the user explicitly asks. Run a relevant verification command after edits."
+    ),
+    host=os.getenv("MCP_HOST", "0.0.0.0"),
+    port=int(os.getenv("MCP_PORT", "8080")),
     streamable_http_path="/mcp",
+    auth=AUTH_SETTINGS,
+    token_verifier=TOKEN_VERIFIER,
 )
 
-HOST_ROOT = Path("/host").resolve()
-SNAPSHOT_ROOT = Path("/snapshots").resolve()
-
-PROJECTS: dict[str, Path] = {}
-CURRENT_PROJECT_NAME = "host"
-CURRENT_PROJECT = HOST_ROOT
+SNAPSHOT_ROOT = Path(os.getenv("SNAPSHOT_ROOT", "/snapshots")).resolve()
 
 PROCESS_LOG_LIMIT = 5000
 BROWSER_LOG_LIMIT = 500
@@ -58,42 +140,125 @@ class BrowserSessionRecord:
     responses: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=BROWSER_LOG_LIMIT))
 
 
-PROCESSES: dict[str, ProcessRecord] = {}
-BROWSER_SESSIONS: dict[str, BrowserSessionRecord] = {}
+@dataclass
+class UserSessionState:
+    subject: str
+    projects: dict[str, Path]
+    current_project_name: str
+    current_project: Path
+    processes: dict[str, ProcessRecord] = field(default_factory=dict)
+    browser_sessions: dict[str, BrowserSessionRecord] = field(default_factory=dict)
+    command_history: list[str] = field(default_factory=list)
+
+
+SESSIONS: dict[str, UserSessionState] = {}
+SESSION_LOCK = threading.RLock()
 PROCESS_LOCK = threading.Lock()
-COMMAND_HISTORY: list[str] = []
 
 MAX_READ_BYTES = 500_000
 MAX_OUTPUT = 80_000
 DEFAULT_TIMEOUT_SECONDS = 30
 
 
+def _workspace_map() -> dict[str, list[Path]]:
+    """Load the subject-to-workspace allowlist. Paths must remain under WORKSPACE_ROOT."""
+    if not WORKSPACE_MAP_PATH.exists():
+        if AUTH_MODE == "disabled":
+            return {"local-dev": [WORKSPACE_ROOT]}
+        raise PermissionError(f"Workspace map is missing: {WORKSPACE_MAP_PATH}")
+    raw = json.loads(WORKSPACE_MAP_PATH.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("Workspace map must be a JSON object")
+    result: dict[str, list[Path]] = {}
+    for subject, roots in raw.items():
+        values = [roots] if isinstance(roots, str) else roots
+        if not isinstance(subject, str) or not isinstance(values, list):
+            raise ValueError("Workspace map values must be paths or lists of paths")
+        resolved = [Path(value).resolve() for value in values]
+        if not all(root.is_relative_to(WORKSPACE_ROOT) for root in resolved):
+            raise ValueError("Every workspace must be beneath WORKSPACE_ROOT")
+        result[subject] = resolved
+    return result
+
+
+def _identity() -> tuple[str, set[str]]:
+    token = get_access_token()
+    if token is None:
+        if AUTH_MODE == "disabled":
+            return "local-dev", {"workspace:read", "workspace:write", "command:run", "browser:use", "network:fetch", "admin:install"}
+        raise PermissionError("OAuth authentication is required")
+    if not token.subject:
+        raise PermissionError("OAuth token has no subject")
+    return token.subject, set(token.scopes)
+
+
+def require_scope(scope: str) -> None:
+    _subject, scopes = _identity()
+    if scope not in scopes:
+        raise PermissionError(f"OAuth scope required: {scope}")
+
+
+def session_state() -> UserSessionState:
+    subject, _scopes = _identity()
+    with SESSION_LOCK:
+        existing = SESSIONS.get(subject)
+        if existing is not None:
+            return existing
+        roots = _workspace_map().get(subject, [])
+        if not roots:
+            raise PermissionError("No workspace has been assigned to this identity")
+        root = roots[0]
+        state = UserSessionState(subject=subject, projects={"workspace": root}, current_project_name="workspace", current_project=root)
+        SESSIONS[subject] = state
+        return state
+
+
+def _is_allowed_path(target: Path, roots: Iterable[Path]) -> bool:
+    return any(target.is_relative_to(root) for root in roots)
+
+
+def user_snapshot_root() -> Path:
+    """Keep snapshot names private to the authenticated identity."""
+    subject = session_state().subject.encode("utf-8")
+    root = SNAPSHOT_ROOT / hashlib.sha256(subject).hexdigest()[:24]
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 def set_current_project(name: str, path: Path) -> None:
-    global CURRENT_PROJECT_NAME, CURRENT_PROJECT
-    PROJECTS[name] = path.resolve()
-    CURRENT_PROJECT_NAME = name
-    CURRENT_PROJECT = path.resolve()
+    state = session_state()
+    state.projects[name] = path.resolve()
+    state.current_project_name = name
+    state.current_project = path.resolve()
 
 
 def resolve_path(path: str = ".") -> Path:
+    require_scope("workspace:read")
+    state = session_state()
     raw = Path(path).expanduser()
 
     if raw.is_absolute():
         target = raw.resolve()
     else:
-        target = (CURRENT_PROJECT / raw).resolve()
+        target = (state.current_project / raw).resolve()
+
+    roots = _workspace_map().get(state.subject, [])
+    if not _is_allowed_path(target, roots):
+        raise PermissionError("Path is outside the assigned workspace")
 
     return target
 
 
 def shell(command: str, cwd: str = ".", timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS) -> str:
-    working_dir = Path(cwd).resolve() if cwd.startswith("/") else resolve_path(cwd)
+    require_scope("command:run")
+    working_dir = resolve_path(cwd)
     timeout = min(max(timeout_seconds, 1), 300)
 
     env = os.environ.copy()
-    env["HOME"] = str(HOST_ROOT)
+    env["HOME"] = str(session_state().current_project)
 
-    COMMAND_HISTORY.append(f"[{CURRENT_PROJECT_NAME}] {working_dir}$ {command}")
+    state = session_state()
+    state.command_history.append(f"[{state.current_project_name}] {working_dir}$ {command}")
 
     try:
         result = subprocess.run(
@@ -133,50 +298,55 @@ def open_project(path: str, name: Optional[str] = None) -> str:
 @mcp.tool()
 def switch_project(name: str) -> str:
     """Switch to a previously opened project."""
-    if name not in PROJECTS:
+    state = session_state()
+    if name not in state.projects:
         raise ValueError(f"Unknown project: {name}")
 
-    set_current_project(name, PROJECTS[name])
-    return f"Switched to project '{name}' at {CURRENT_PROJECT}"
+    set_current_project(name, state.projects[name])
+    return f"Switched to project '{name}' at {state.current_project}"
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def list_projects() -> str:
     """List opened projects."""
-    if not PROJECTS:
+    state = session_state()
+    if not state.projects:
         return "No projects opened."
 
     return "\n".join(
-        f"{'*' if name == CURRENT_PROJECT_NAME else ' '} {name}: {path}"
-        for name, path in PROJECTS.items()
+        f"{'*' if name == state.current_project_name else ' '} {name}: {path}"
+        for name, path in state.projects.items()
     )
 
 
 @mcp.tool()
 def close_project(name: str) -> str:
     """Forget an opened project."""
-    global CURRENT_PROJECT_NAME, CURRENT_PROJECT
+    state = session_state()
 
-    if name not in PROJECTS:
+    if name not in state.projects:
         raise ValueError(f"Unknown project: {name}")
 
-    del PROJECTS[name]
+    del state.projects[name]
 
-    if name == CURRENT_PROJECT_NAME:
-        CURRENT_PROJECT_NAME = "host"
-        CURRENT_PROJECT = HOST_ROOT
+    if name == state.current_project_name:
+        if not state.projects:
+            raise ValueError("Cannot close the last workspace project")
+        state.current_project_name, state.current_project = next(iter(state.projects.items()))
 
     return f"Closed project: {name}"
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def pwd() -> str:
     """Return the active project directory."""
-    return f"{CURRENT_PROJECT_NAME}: {CURRENT_PROJECT}"
+    state = session_state()
+    return f"{state.current_project_name}: {state.current_project}"
 
 
 @mcp.tool()
 def write_file(file_path: str, contents: str) -> str:
+    require_scope("workspace:write")
     target = resolve_path(file_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(contents, encoding="utf-8")
@@ -185,6 +355,7 @@ def write_file(file_path: str, contents: str) -> str:
 
 @mcp.tool()
 def append_file(file_path: str, contents: str) -> str:
+    require_scope("workspace:write")
     target = resolve_path(file_path)
     target.parent.mkdir(parents=True, exist_ok=True)
 
@@ -194,7 +365,7 @@ def append_file(file_path: str, contents: str) -> str:
     return f"Appended {len(contents)} characters to {target}"
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def read_file(file_path: str, start_line: int = 1, max_lines: int = 300) -> str:
     target = resolve_path(file_path)
 
@@ -213,7 +384,7 @@ def read_file(file_path: str, start_line: int = 1, max_lines: int = 300) -> str:
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def read_files(file_paths: list[str]) -> str:
     return "\n\n".join(
         f"--- {path} ---\n{read_file(path)}"
@@ -228,6 +399,7 @@ def replace_in_file(
     new_text: str,
     expected_replacements: Optional[int] = None,
 ) -> str:
+    require_scope("workspace:write")
     target = resolve_path(file_path)
     text = target.read_text(encoding="utf-8")
     count = text.count(old_text)
@@ -244,6 +416,7 @@ def replace_in_file(
 
 @mcp.tool()
 def replace_lines(file_path: str, start_line: int, end_line: int, new_content: str) -> str:
+    require_scope("workspace:write")
     target = resolve_path(file_path)
     lines = target.read_text(encoding="utf-8").splitlines()
 
@@ -257,6 +430,7 @@ def replace_lines(file_path: str, start_line: int, end_line: int, new_content: s
 
 @mcp.tool()
 def insert_at_line(file_path: str, line_number: int, content: str) -> str:
+    require_scope("workspace:write")
     target = resolve_path(file_path)
     lines = target.read_text(encoding="utf-8").splitlines()
 
@@ -269,6 +443,7 @@ def insert_at_line(file_path: str, line_number: int, content: str) -> str:
 
 @mcp.tool()
 def copy_path(source: str, destination: str) -> str:
+    require_scope("workspace:write")
     src = resolve_path(source)
     dst = resolve_path(destination)
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -283,6 +458,7 @@ def copy_path(source: str, destination: str) -> str:
 
 @mcp.tool()
 def move_path(source: str, destination: str) -> str:
+    require_scope("workspace:write")
     src = resolve_path(source)
     dst = resolve_path(destination)
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -292,6 +468,7 @@ def move_path(source: str, destination: str) -> str:
 
 @mcp.tool()
 def delete_path(path: str) -> str:
+    require_scope("workspace:write")
     target = resolve_path(path)
 
     if target.is_dir():
@@ -304,12 +481,13 @@ def delete_path(path: str) -> str:
 
 @mcp.tool()
 def create_directory(directory: str) -> str:
+    require_scope("workspace:write")
     target = resolve_path(directory)
     target.mkdir(parents=True, exist_ok=True)
     return f"Created directory: {target}"
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def list_files(directory: str = ".", recursive: bool = True, max_entries: int = 800) -> str:
     root = resolve_path(directory)
     iterator = root.rglob("*") if recursive else root.iterdir()
@@ -321,7 +499,7 @@ def list_files(directory: str = ".", recursive: bool = True, max_entries: int = 
             break
 
         try:
-            rel = path.relative_to(CURRENT_PROJECT)
+            rel = path.relative_to(session_state().current_project)
         except ValueError:
             rel = path
 
@@ -330,7 +508,7 @@ def list_files(directory: str = ".", recursive: bool = True, max_entries: int = 
     return "\n".join(entries)
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def tree(directory: str = ".", depth: int = 3, max_entries: int = 400) -> str:
     root = resolve_path(directory)
     output = [f"{root}/"]
@@ -361,7 +539,7 @@ def tree(directory: str = ".", depth: int = 3, max_entries: int = 400) -> str:
     return "\n".join(output)
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def find_file(pattern: str, directory: str = ".", max_results: int = 200) -> str:
     root = resolve_path(directory)
     results = []
@@ -375,7 +553,7 @@ def find_file(pattern: str, directory: str = ".", max_results: int = 200) -> str
     return "\n".join(results)
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def search_files(query: str, directory: str = ".", max_results: int = 200) -> str:
     root = resolve_path(directory)
     results = []
@@ -401,7 +579,7 @@ def search_files(query: str, directory: str = ".", max_results: int = 200) -> st
     return "\n".join(results)
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def regex_search(pattern: str, directory: str = ".", max_results: int = 200) -> str:
     root = resolve_path(directory)
     rx = re.compile(pattern)
@@ -428,13 +606,13 @@ def regex_search(pattern: str, directory: str = ".", max_results: int = 200) -> 
     return "\n".join(results)
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def find_symbol(name: str, directory: str = ".", max_results: int = 100) -> str:
     pattern = rf"^\s*(def|class|function|const|let|var|async function|export function|export class)\s+{re.escape(name)}\b"
     return regex_search(pattern, directory, max_results)
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def stat_path(path: str) -> str:
     target = resolve_path(path)
     stat = target.stat()
@@ -454,7 +632,7 @@ def run_command(command: str, cwd: str = ".", timeout_seconds: int = DEFAULT_TIM
 
 @mcp.tool()
 def command_history(max_entries: int = 50) -> str:
-    return "\n".join(COMMAND_HISTORY[-max_entries:])
+    return "\n".join(session_state().command_history[-max_entries:])
 
 
 def _process_status(record: ProcessRecord) -> str:
@@ -491,13 +669,14 @@ def start_process(command: str, cwd: str = ".", name: Optional[str] = None) -> s
     if not process_id:
         process_id = str(uuid.uuid4())[:8]
 
-    if process_id in PROCESSES:
+    state = session_state()
+    if process_id in state.processes:
         raise ValueError(f"Process id already exists: {process_id}")
 
     env = os.environ.copy()
-    env["HOME"] = str(HOST_ROOT)
+    env["HOME"] = str(state.current_project)
 
-    COMMAND_HISTORY.append(f"[{CURRENT_PROJECT_NAME}] {working_dir}$ {command}  # process={process_id}")
+    state.command_history.append(f"[{state.current_project_name}] {working_dir}$ {command}  # process={process_id}")
 
     process = subprocess.Popen(
         command,
@@ -509,6 +688,7 @@ def start_process(command: str, cwd: str = ".", name: Optional[str] = None) -> s
         stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,
         bufsize=1,
+        start_new_session=True,
     )
 
     record = ProcessRecord(
@@ -519,7 +699,7 @@ def start_process(command: str, cwd: str = ".", name: Optional[str] = None) -> s
     )
 
     with PROCESS_LOCK:
-        PROCESSES[process_id] = record
+        state.processes[process_id] = record
 
     reader = threading.Thread(
         target=_read_process_output,
@@ -544,7 +724,7 @@ def list_processes() -> str:
     rows = []
 
     with PROCESS_LOCK:
-        items = list(PROCESSES.items())
+        items = list(session_state().processes.items())
 
     for process_id, record in items:
         rows.append(
@@ -566,7 +746,7 @@ def list_processes() -> str:
 def get_process_output(process_id: str, max_lines: int = 300, since_line: Optional[int] = None) -> str:
     """Return captured process output without blocking. Use since_line for incremental reads."""
     with PROCESS_LOCK:
-        record = PROCESSES.get(process_id)
+        record = session_state().processes.get(process_id)
         if record is None:
             raise ValueError("Unknown process_id")
 
@@ -610,7 +790,7 @@ def wait_for_process_output(process_id: str, text: str, timeout_seconds: int = 3
 
     while time.time() < deadline:
         with PROCESS_LOCK:
-            record = PROCESSES.get(process_id)
+            record = session_state().processes.get(process_id)
             if record is None:
                 raise ValueError("Unknown process_id")
 
@@ -649,21 +829,21 @@ def wait_for_process_output(process_id: str, text: str, timeout_seconds: int = 3
 def stop_process(process_id: str, kill: bool = False) -> str:
     """Stop a tracked process. Uses terminate first unless kill=True."""
     with PROCESS_LOCK:
-        record = PROCESSES.get(process_id)
+        record = session_state().processes.get(process_id)
 
     if record is None:
         raise ValueError("Unknown process_id")
 
     if record.process.poll() is None:
         if kill:
-            record.process.kill()
+            os.killpg(record.process.pid, 9)
         else:
-            record.process.terminate()
+            os.killpg(record.process.pid, 15)
 
         try:
             record.process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            record.process.kill()
+            os.killpg(record.process.pid, 9)
             record.process.wait(timeout=5)
 
     status = _process_status(record)
@@ -674,7 +854,7 @@ def stop_process(process_id: str, kill: bool = False) -> str:
 def forget_process(process_id: str) -> str:
     """Remove a stopped process from the tracked process list."""
     with PROCESS_LOCK:
-        record = PROCESSES.get(process_id)
+        record = session_state().processes.get(process_id)
 
         if record is None:
             raise ValueError("Unknown process_id")
@@ -682,13 +862,14 @@ def forget_process(process_id: str) -> str:
         if record.process.poll() is None:
             raise ValueError("Process is still running; stop it before forgetting it")
 
-        del PROCESSES[process_id]
+        del session_state().processes[process_id]
 
     return f"Forgot process {process_id}"
 
 
 @mcp.tool()
 def apply_patch(patch: str, cwd: str = ".") -> str:
+    require_scope("workspace:write")
     working_dir = resolve_path(cwd)
 
     process = subprocess.run(
@@ -744,6 +925,7 @@ def git_restore(path: str = ".", cwd: str = ".") -> str:
 
 @mcp.tool()
 def fetch_url(url: str, timeout_seconds: int = 10) -> str:
+    require_scope("network:fetch")
     request = urllib.request.Request(url, headers={"User-Agent": "coding-agent-mcp"})
 
     try:
@@ -757,6 +939,7 @@ def fetch_url(url: str, timeout_seconds: int = 10) -> str:
 
 
 def _load_playwright():
+    require_scope("browser:use")
     try:
         from playwright.async_api import async_playwright
     except Exception as exc:
@@ -1228,7 +1411,7 @@ async def _evaluate_form_snapshot(page, element_limit: int, text_limit: int) -> 
 
 
 def _get_browser_session(session_id: str) -> BrowserSessionRecord:
-    record = BROWSER_SESSIONS.get(session_id)
+    record = session_state().browser_sessions.get(session_id)
     if record is None:
         raise ValueError(f"Unknown browser session: {session_id}")
     return record
@@ -1594,7 +1777,8 @@ async def browser_session_open(
     session_id = (session_id or str(uuid.uuid4())[:8]).strip()
     if not session_id:
         session_id = str(uuid.uuid4())[:8]
-    if session_id in BROWSER_SESSIONS:
+    state = session_state()
+    if session_id in state.browser_sessions:
         raise ValueError(f"Browser session already exists: {session_id}")
 
     playwright = await async_playwright().start()
@@ -1602,7 +1786,7 @@ async def browser_session_open(
     page.set_default_timeout(timeout_ms)
     record = BrowserSessionRecord(playwright=playwright, browser=browser, context=context, page=page, created_at=time.time())
     _attach_session_events(session_id, page, record)
-    BROWSER_SESSIONS[session_id] = record
+    state.browser_sessions[session_id] = record
     try:
         await page.goto(target_url, wait_until=wait_until, timeout=timeout_ms)
         summary = await _collect_page_summary(page, include_text=True, text_limit=text_limit)
@@ -1612,15 +1796,16 @@ async def browser_session_open(
         await context.close()
         await browser.close()
         await playwright.stop()
-        BROWSER_SESSIONS.pop(session_id, None)
+        state.browser_sessions.pop(session_id, None)
         raise
 
 
 @mcp.tool()
 def browser_session_list() -> str:
     """List open persistent browser sessions."""
+    require_scope("browser:use")
     sessions = []
-    for session_id, record in BROWSER_SESSIONS.items():
+    for session_id, record in session_state().browser_sessions.items():
         sessions.append({
             "session_id": session_id,
             "url": record.page.url,
@@ -1637,7 +1822,7 @@ def browser_session_list() -> str:
 async def browser_session_close(session_id: str) -> str:
     """Close a persistent browser session and free its browser process."""
     record = _get_browser_session(session_id)
-    BROWSER_SESSIONS.pop(session_id, None)
+    session_state().browser_sessions.pop(session_id, None)
     await record.context.close()
     await record.browser.close()
     await record.playwright.stop()
@@ -1716,6 +1901,7 @@ async def browser_session_accessibility_snapshot(
 @mcp.tool()
 def browser_session_logs(session_id: str, max_entries: int = 100) -> str:
     """Return recent console errors/warnings, page errors, failed requests, and bad responses for a persistent browser session."""
+    require_scope("browser:use")
     record = _get_browser_session(session_id)
     limit = _safe_int(max_entries, 100, 1, BROWSER_LOG_LIMIT)
     return _format_browser_result({
@@ -1731,25 +1917,33 @@ def browser_session_logs(session_id: str, max_entries: int = 100) -> str:
 
 @mcp.tool()
 def create_snapshot(name: Optional[str] = None) -> str:
-    SNAPSHOT_ROOT.mkdir(parents=True, exist_ok=True)
+    require_scope("workspace:write")
+    snapshots = user_snapshot_root()
 
-    snapshot_id = name or f"{CURRENT_PROJECT_NAME}-{int(time.time())}"
-    target = SNAPSHOT_ROOT / snapshot_id
+    state = session_state()
+    snapshot_id = name or f"{state.current_project_name}-{int(time.time())}"
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,80}", snapshot_id):
+        raise ValueError("Snapshot name may contain only letters, digits, '.', '_' and '-'")
+    target = snapshots / snapshot_id
+    if target.exists():
+        raise FileExistsError(f"Snapshot already exists: {snapshot_id}")
 
     ignore = shutil.ignore_patterns(".git", "node_modules", "__pycache__", ".venv", "dist", "build")
-    shutil.copytree(CURRENT_PROJECT, target, ignore=ignore)
+    shutil.copytree(state.current_project, target, ignore=ignore)
 
     return f"Created snapshot: {snapshot_id}"
 
 
 @mcp.tool()
 def restore_snapshot(snapshot_id: str) -> str:
-    source = (SNAPSHOT_ROOT / snapshot_id).resolve()
+    require_scope("workspace:write")
+    source = (user_snapshot_root() / snapshot_id).resolve()
 
-    if not source.exists() or SNAPSHOT_ROOT not in source.parents:
+    if not source.exists() or user_snapshot_root() not in source.parents:
         raise FileNotFoundError("Snapshot not found")
 
-    for item in CURRENT_PROJECT.iterdir():
+    project = session_state().current_project
+    for item in project.iterdir():
         if item.name == ".git":
             continue
         if item.is_dir():
@@ -1758,7 +1952,7 @@ def restore_snapshot(snapshot_id: str) -> str:
             item.unlink()
 
     for item in source.iterdir():
-        dest = CURRENT_PROJECT / item.name
+        dest = project / item.name
         if item.is_dir():
             shutil.copytree(item, dest)
         else:
@@ -1769,12 +1963,13 @@ def restore_snapshot(snapshot_id: str) -> str:
 
 @mcp.tool()
 def list_snapshots() -> str:
-    SNAPSHOT_ROOT.mkdir(parents=True, exist_ok=True)
-    return "\n".join(sorted(path.name for path in SNAPSHOT_ROOT.iterdir() if path.is_dir()))
+    require_scope("workspace:read")
+    return "\n".join(sorted(path.name for path in user_snapshot_root().iterdir() if path.is_dir()))
 
 
 @mcp.tool()
 def get_project_info() -> str:
+    state = session_state()
     markers = {
         "git": ".git",
         "package_json": "package.json",
@@ -1789,12 +1984,12 @@ def get_project_info() -> str:
     }
 
     lines = [
-        f"name: {CURRENT_PROJECT_NAME}",
-        f"path: {CURRENT_PROJECT}",
+        f"name: {state.current_project_name}",
+        f"path: {state.current_project}",
     ]
 
     for key, marker in markers.items():
-        lines.append(f"{key}: {(CURRENT_PROJECT / marker).exists()}")
+        lines.append(f"{key}: {(state.current_project / marker).exists()}")
 
     return "\n".join(lines)
 
@@ -1816,11 +2011,12 @@ def environment_info() -> str:
 @mcp.tool()
 def install_apt_packages(packages: list[str]) -> str:
     """Install Debian packages inside the MCP container."""
+    require_scope("admin:install")
     safe_packages = " ".join(shlex.quote(pkg) for pkg in packages)
 
     return shell(
         f"apt-get update && apt-get install -y --no-install-recommends {safe_packages}",
-        cwd="/",
+        cwd=".",
         timeout_seconds=300,
     )
 
@@ -1828,6 +2024,7 @@ def install_apt_packages(packages: list[str]) -> str:
 @mcp.tool()
 def install_python_packages(packages: list[str]) -> str:
     """Install Python packages globally inside the MCP container."""
+    require_scope("admin:install")
     safe_packages = " ".join(shlex.quote(pkg) for pkg in packages)
 
     return shell(
@@ -1840,6 +2037,7 @@ def install_python_packages(packages: list[str]) -> str:
 @mcp.tool()
 def install_node_packages(packages: list[str], dev: bool = False, package_manager: str = "npm") -> str:
     """Install Node packages in the active project."""
+    require_scope("workspace:write")
     safe_packages = " ".join(shlex.quote(pkg) for pkg in packages)
 
     if package_manager == "npm":
@@ -1857,16 +2055,18 @@ def install_node_packages(packages: list[str], dev: bool = False, package_manage
 @mcp.tool()
 def install_project_dependencies(package_manager: Optional[str] = None) -> str:
     """Install dependencies for the active project."""
+    require_scope("workspace:write")
     if package_manager is None:
-        if (CURRENT_PROJECT / "pnpm-lock.yaml").exists():
+        project = session_state().current_project
+        if (project / "pnpm-lock.yaml").exists():
             package_manager = "pnpm"
-        elif (CURRENT_PROJECT / "yarn.lock").exists():
+        elif (project / "yarn.lock").exists():
             package_manager = "yarn"
-        elif (CURRENT_PROJECT / "package-lock.json").exists() or (CURRENT_PROJECT / "package.json").exists():
+        elif (project / "package-lock.json").exists() or (project / "package.json").exists():
             package_manager = "npm"
-        elif (CURRENT_PROJECT / "requirements.txt").exists():
+        elif (project / "requirements.txt").exists():
             return shell("pip install -r requirements.txt", timeout_seconds=300)
-        elif (CURRENT_PROJECT / "pyproject.toml").exists():
+        elif (project / "pyproject.toml").exists():
             return shell("pip install -e .", timeout_seconds=300)
         else:
             raise ValueError("Could not detect project dependency manager")
@@ -1886,5 +2086,4 @@ def install_project_dependencies(package_manager: Optional[str] = None) -> str:
     raise ValueError("Unsupported package manager")
 
 if __name__ == "__main__":
-    PROJECTS["host"] = HOST_ROOT
     mcp.run(transport="streamable-http")

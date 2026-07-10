@@ -1,27 +1,43 @@
 services:
   mcp-server:
     build: .
-    container_name: mcp-test
-    user: root
-
-    ports:
-      - "8081:8080"
-
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
-    environment:
-      NO_PROXY: "localhost,127.0.0.1,host.docker.internal"
-      no_proxy: "localhost,127.0.0.1,host.docker.internal"
-      HOME: "/host"
-      PLAYWRIGHT_BROWSERS_PATH: "/ms-playwright"
-      GIT_SSH_COMMAND: "ssh -i /root/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
-
-    volumes:
-      - /home/anshagrawal:/host
-      - /home/anshagrawal/.ssh:/root/.ssh:ro
-      - ./app:/app/app
-      - ./snapshots:/snapshots
-      - /var/run/docker.sock:/var/run/docker.sock
-
     restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    environment:
+      AUTH_MODE: required
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8080
+      PUBLIC_URL: ${PUBLIC_URL:?Set the public HTTPS MCP URL, e.g. https://mcp.example.com}
+      OIDC_ISSUER: ${OIDC_ISSUER:?Set your OAuth/OIDC issuer URL}
+      OIDC_AUDIENCE: ${OIDC_AUDIENCE:?Set the access-token audience for this MCP}
+      OIDC_JWKS_URL: ${OIDC_JWKS_URL:?Set the issuer JWKS URL}
+      WORKSPACE_ROOT: /workspaces
+      WORKSPACE_MAP_PATH: /config/workspaces.json
+      SNAPSHOT_ROOT: /snapshots
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+    volumes:
+      - ${WORKSPACES_DIR:-./workspaces}:/workspaces
+      - ./config:/config:ro
+      - ./snapshots:/snapshots
+    expose:
+      - "8080"
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    profiles: ["production"]
+    depends_on:
+      - mcp-server
+    environment:
+      MCP_DOMAIN: ${MCP_DOMAIN:?Set the public DNS name, e.g. mcp.example.com}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

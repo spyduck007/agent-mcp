@@ -1,0 +1,4 @@
+{
+  "oidc-subject-for-alice": ["/workspaces/alice-project"],
+  "oidc-subject-for-bob": ["/workspaces/bob-project"]
+}
