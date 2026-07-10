@@ -215,6 +215,15 @@ By default, the server binds to `0.0.0.0:8080` and serves MCP traffic at `/mcp`.
 - `find_symbol`
 - `stat_path`
 - `apply_patch`
+- `file_hash`
+- `read_binary_file`
+- `write_binary_file`
+- `atomic_write_file`
+- `diff_files`
+- `search_all_matches`
+- `chmod_path`
+- `create_symlink`
+- `read_symlink`
 
 ### Shell and Process Tools
 
@@ -226,6 +235,7 @@ By default, the server binds to `0.0.0.0:8080` and serves MCP traffic at `/mcp`.
 - `wait_for_process_output`
 - `stop_process`
 - `forget_process`
+- `run_command_advanced`
 
 ### Git Tools
 
@@ -235,6 +245,15 @@ By default, the server binds to `0.0.0.0:8080` and serves MCP traffic at `/mcp`.
 - `git_branch`
 - `git_checkout`
 - `git_commit`
+- `git_restore`
+- `git_staged_diff`
+- `git_show`
+- `git_blame`
+- `git_fetch`
+- `git_pull`
+- `git_push`
+- `git_stash`
+- `git_worktree`
 
 ### Browser Tools
 
@@ -257,6 +276,11 @@ By default, the server binds to `0.0.0.0:8080` and serves MCP traffic at `/mcp`.
 - `browser_session_dom_snapshot`
 - `browser_session_accessibility_snapshot`
 - `browser_session_logs`
+- `browser_session_upload`
+- `browser_session_frame_evaluate`
+- `browser_session_route`
+- `browser_session_trace`
+- `browser_session_import_storage`
 
 ### Snapshot Tools
 
@@ -270,6 +294,20 @@ By default, the server binds to `0.0.0.0:8080` and serves MCP traffic at `/mcp`.
 - `install_python_packages`
 - `install_node_packages`
 - `install_project_dependencies`
+
+### Network, Database, and Deployment Tools
+
+- `http_request`
+- `http_download`
+- `http_upload`
+- `dns_lookup`
+- `tcp_check`
+- `tls_certificate`
+- `database_query`
+- `compose_status`
+- `compose_logs`
+- `compose_restart`
+- `wait_for_http_health`
 
 ## Browser Action Format
 
@@ -343,15 +381,19 @@ Review the host paths in `docker-compose.yml` before sharing or deploying this p
 
 ## Configuration
 
-Most behavior is currently configured in `app/server.py`:
+Most behavior is currently configured in `app/server.py` and Compose environment variables:
 
-- `HOST_ROOT=/host`
+- `WORKSPACE_ROOT=/workspaces`
+- `WORKSPACE_MAP_PATH=/config/workspaces.json`
+- `SECRET_REFS_PATH=/config/secrets.json`
 - `SNAPSHOT_ROOT=/snapshots`
 - `PROCESS_LOG_LIMIT=5000`
 - `BROWSER_LOG_LIMIT=500`
 - `MAX_READ_BYTES=500000`
 - `MAX_OUTPUT=80000`
 - `DEFAULT_TIMEOUT_SECONDS=30`
+
+For named secret injection, copy `config/secrets.example.json` to `config/secrets.json`, replace its values, and keep that file out of Git. Tools can request a secret by its reference name through `secret_refs`; values are injected into the child process only and are not returned by the MCP server. The self-hosted Keycloak role `secrets:use` is required. `database:use` and `deploy:run` govern database and Compose primitives.
 
 The Docker image sets:
 

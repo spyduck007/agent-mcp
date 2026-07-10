@@ -12,6 +12,7 @@ services:
       OIDC_CLIENT_ID: chatgpt-agent-mcp
       WORKSPACE_ROOT: /workspaces
       WORKSPACE_MAP_PATH: /config/workspaces.json
+      SECRET_REFS_PATH: /config/secrets.json
       SNAPSHOT_ROOT: /snapshots
       PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
     volumes:

@@ -8,6 +8,11 @@ import threading
 import time
 import uuid
 import hashlib
+import base64
+import difflib
+import socket
+import ssl
+from urllib.parse import urlparse
 from collections.abc import Iterable
 from collections import deque
 from dataclasses import dataclass, field
@@ -30,6 +35,7 @@ except ImportError:  # pragma: no cover - clearer startup error below
 AUTH_MODE = os.getenv("AUTH_MODE", "required").lower()
 WORKSPACE_ROOT = Path(os.getenv("WORKSPACE_ROOT", "/workspaces")).resolve()
 WORKSPACE_MAP_PATH = Path(os.getenv("WORKSPACE_MAP_PATH", "/config/workspaces.json"))
+SECRET_REFS_PATH = Path(os.getenv("SECRET_REFS_PATH", "/config/secrets.json"))
 PUBLIC_URL = os.getenv("PUBLIC_URL", "")
 KEYCLOAK_REALM = os.getenv("KEYCLOAK_REALM", "agent-mcp")
 OIDC_ISSUER = os.getenv("OIDC_ISSUER", f"{PUBLIC_URL.rstrip('/')}/auth/realms/{KEYCLOAK_REALM}").rstrip("/")
@@ -196,7 +202,7 @@ def _identity() -> tuple[str, set[str]]:
     token = get_access_token()
     if token is None:
         if AUTH_MODE == "disabled":
-            return "local-dev", {"workspace:read", "workspace:write", "command:run", "browser:use", "network:fetch", "admin:install"}
+            return "local-dev", {"workspace:read", "workspace:write", "command:run", "browser:use", "network:fetch", "admin:install", "secrets:use", "database:use", "deploy:run"}
         raise PermissionError("OAuth authentication is required")
     if not token.subject:
         raise PermissionError("OAuth token has no subject")
@@ -1794,6 +1800,7 @@ async def browser_session_open(
 
     playwright = await async_playwright().start()
     browser, context, page = await _new_browser_page(playwright, width, height)
+    await context.tracing.start(screenshots=False, snapshots=True, sources=True)
     page.set_default_timeout(timeout_ms)
     record = BrowserSessionRecord(playwright=playwright, browser=browser, context=context, page=page, created_at=time.time())
     _attach_session_events(session_id, page, record)
@@ -2095,6 +2102,495 @@ def install_project_dependencies(package_manager: Optional[str] = None) -> str:
         return shell("pip install -r requirements.txt", timeout_seconds=300)
 
     raise ValueError("Unsupported package manager")
+
+
+# Advanced low-level primitives. These keep the broad agent capability available
+# while providing structured inputs and outputs for reliable higher-level flows.
+
+def _secret_values(names: list[str]) -> dict[str, str]:
+    if not names:
+        return {}
+    require_scope("secrets:use")
+    if not SECRET_REFS_PATH.exists():
+        raise FileNotFoundError("Secret reference file is not configured")
+    values = json.loads(SECRET_REFS_PATH.read_text(encoding="utf-8"))
+    if not isinstance(values, dict):
+        raise ValueError("Secret reference file must contain a JSON object")
+    missing = [name for name in names if not isinstance(values.get(name), str)]
+    if missing:
+        raise ValueError(f"Unknown secret reference(s): {', '.join(missing)}")
+    return {name: values[name] for name in names}
+
+
+def _command_environment(environment: Optional[dict[str, str]], secret_refs: Optional[list[str]]) -> dict[str, str]:
+    env = os.environ.copy()
+    env["HOME"] = str(session_state().current_project)
+    for name, value in (environment or {}).items():
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            raise ValueError(f"Invalid environment variable name: {name}")
+        env[name] = str(value)
+    env.update(_secret_values(secret_refs or []))
+    return env
+
+
+@mcp.tool()
+def run_command_advanced(
+    argv: list[str],
+    cwd: str = ".",
+    environment: Optional[dict[str, str]] = None,
+    secret_refs: Optional[list[str]] = None,
+    stdin: Optional[str] = None,
+    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    output_file: Optional[str] = None,
+) -> str:
+    """Run an argv command without shell parsing. Supports controlled environment values, named secret injection, stdin, timeout, and optional captured-output file. Secret values are never returned by this tool."""
+    require_scope("command:run")
+    if not argv or not all(isinstance(part, str) and part for part in argv):
+        raise ValueError("argv must contain one or more non-empty strings")
+    working_dir = resolve_path(cwd)
+    timeout = min(max(timeout_seconds, 1), 300)
+    state = session_state()
+    state.command_history.append(f"[{state.current_project_name}] {working_dir}$ {shlex.join(argv)}")
+    try:
+        result = subprocess.run(
+            argv,
+            cwd=working_dir,
+            env=_command_environment(environment, secret_refs),
+            input=stdin,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+        timed_out = False
+    except subprocess.TimeoutExpired as exc:
+        result = None
+        timed_out = True
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+    else:
+        stdout = result.stdout
+        stderr = result.stderr
+
+    combined = f"stdout:\n{stdout}\n\nstderr:\n{stderr}"
+    output_path = None
+    if output_file:
+        require_scope("workspace:write")
+        target = resolve_path(output_file)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(combined, encoding="utf-8")
+        output_path = str(target)
+    return _format_browser_result({
+        "argv": argv,
+        "cwd": str(working_dir),
+        "exit_code": None if timed_out else result.returncode,
+        "timed_out": timed_out,
+        "timeout_seconds": timeout,
+        "stdout": stdout[:MAX_OUTPUT],
+        "stderr": stderr[:MAX_OUTPUT],
+        "output_file": output_path,
+        "secret_refs_used": secret_refs or [],
+    })
+
+
+@mcp.tool()
+def file_hash(file_path: str, algorithm: str = "sha256") -> str:
+    """Return a cryptographic hash of a workspace file without returning its contents."""
+    if algorithm not in hashlib.algorithms_available:
+        raise ValueError(f"Unsupported hash algorithm: {algorithm}")
+    target = resolve_path(file_path)
+    digest = hashlib.new(algorithm)
+    with target.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return _format_browser_result({"path": str(target), "algorithm": algorithm, "digest": digest.hexdigest(), "size_bytes": target.stat().st_size})
+
+
+@mcp.tool()
+def read_binary_file(file_path: str, max_bytes: int = 500_000) -> str:
+    """Read a binary workspace file as bounded base64 data."""
+    target = resolve_path(file_path)
+    limit = min(max(max_bytes, 1), MAX_READ_BYTES)
+    data = target.read_bytes()[:limit]
+    return _format_browser_result({"path": str(target), "data_base64": base64.b64encode(data).decode("ascii"), "size_bytes_returned": len(data), "truncated": target.stat().st_size > len(data)})
+
+
+@mcp.tool()
+def write_binary_file(file_path: str, data_base64: str, expected_sha256: Optional[str] = None) -> str:
+    """Write base64 binary data atomically within the assigned workspace."""
+    require_scope("workspace:write")
+    try:
+        data = base64.b64decode(data_base64, validate=True)
+    except Exception as exc:
+        raise ValueError("data_base64 is not valid base64") from exc
+    target = resolve_path(file_path)
+    if expected_sha256 and target.exists() and file_hash(file_path).find(expected_sha256) < 0:
+        raise ValueError("Existing file hash does not match expected_sha256")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    temporary.write_bytes(data)
+    temporary.replace(target)
+    return _format_browser_result({"path": str(target), "size_bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+
+
+@mcp.tool()
+def atomic_write_file(file_path: str, contents: str, expected_sha256: Optional[str] = None) -> str:
+    """Atomically replace a text file, optionally only when its current SHA-256 matches."""
+    require_scope("workspace:write")
+    target = resolve_path(file_path)
+    if expected_sha256 and target.exists():
+        current = hashlib.sha256(target.read_bytes()).hexdigest()
+        if current != expected_sha256:
+            raise ValueError("Existing file hash does not match expected_sha256")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    temporary.write_text(contents, encoding="utf-8")
+    temporary.replace(target)
+    return _format_browser_result({"path": str(target), "sha256": hashlib.sha256(contents.encode()).hexdigest(), "characters": len(contents)})
+
+
+@mcp.tool()
+def diff_files(left_path: str, right_path: str, context_lines: int = 3) -> str:
+    """Return a unified diff between two workspace text files."""
+    left = resolve_path(left_path)
+    right = resolve_path(right_path)
+    context = min(max(context_lines, 0), 100)
+    diff = difflib.unified_diff(
+        left.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True),
+        right.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True),
+        fromfile=str(left), tofile=str(right), n=context,
+    )
+    return "".join(diff)[:MAX_OUTPUT]
+
+
+@mcp.tool()
+def search_all_matches(query: str, directory: str = ".", max_results: int = 500, case_sensitive: bool = True) -> str:
+    """Search every matching line across workspace text files, rather than only the first match per file."""
+    root = resolve_path(directory)
+    needle = query if case_sensitive else query.lower()
+    rows: list[str] = []
+    for path in root.rglob("*"):
+        if len(rows) >= max_results:
+            rows.append("... output truncated ...")
+            break
+        if not path.is_file() or any(part in {".git", "node_modules", ".venv"} for part in path.parts):
+            continue
+        try:
+            for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
+                haystack = line if case_sensitive else line.lower()
+                if needle in haystack:
+                    rows.append(f"{path}:{line_number}: {line}")
+                    if len(rows) >= max_results:
+                        break
+        except OSError:
+            continue
+    return "\n".join(rows)
+
+
+@mcp.tool()
+def chmod_path(path: str, mode: str) -> str:
+    """Set workspace file permissions using an octal mode such as '755'."""
+    require_scope("workspace:write")
+    if not re.fullmatch(r"[0-7]{3,4}", mode):
+        raise ValueError("mode must be a 3- or 4-digit octal string")
+    target = resolve_path(path)
+    target.chmod(int(mode, 8))
+    return f"Set {target} mode to {mode}"
+
+
+@mcp.tool()
+def create_symlink(target: str, link_path: str) -> str:
+    """Create a workspace-contained symbolic link. Both target and link must remain in the assigned workspace."""
+    require_scope("workspace:write")
+    source = resolve_path(target)
+    link = resolve_path(link_path)
+    if link.exists() or link.is_symlink():
+        raise FileExistsError(link_path)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(source)
+    return f"Created symlink {link} -> {source}"
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def read_symlink(path: str) -> str:
+    """Return a symbolic link target after validating that it remains in the workspace."""
+    link = resolve_path(path)
+    if not link.is_symlink():
+        raise ValueError("Path is not a symbolic link")
+    resolved = link.resolve()
+    resolve_path(str(resolved))
+    return _format_browser_result({"path": str(link), "link_target": str(link.readlink()), "resolved_target": str(resolved)})
+
+
+@mcp.tool()
+def git_staged_diff(cwd: str = ".") -> str:
+    return shell("git diff --cached", cwd)
+
+
+@mcp.tool()
+def git_show(revision: str = "HEAD", cwd: str = ".") -> str:
+    return shell(f"git show --stat --patch {shlex.quote(revision)}", cwd)
+
+
+@mcp.tool()
+def git_blame(file_path: str, start_line: Optional[int] = None, end_line: Optional[int] = None, cwd: str = ".") -> str:
+    line_range = "" if start_line is None else f" -L {max(start_line, 1)},{max(end_line or start_line, start_line)}"
+    return shell(f"git blame{line_range} -- {shlex.quote(file_path)}", cwd)
+
+
+@mcp.tool()
+def git_fetch(remote: str = "origin", cwd: str = ".") -> str:
+    return shell(f"git fetch {shlex.quote(remote)} --prune", cwd)
+
+
+@mcp.tool()
+def git_pull(remote: str = "origin", branch: Optional[str] = None, rebase: bool = True, cwd: str = ".") -> str:
+    require_scope("workspace:write")
+    branch_part = f" {shlex.quote(branch)}" if branch else ""
+    return shell(f"git pull {'--rebase ' if rebase else ''}{shlex.quote(remote)}{branch_part}", cwd)
+
+
+@mcp.tool()
+def git_push(remote: str = "origin", branch: Optional[str] = None, set_upstream: bool = False, cwd: str = ".") -> str:
+    require_scope("workspace:write")
+    branch_part = f" {shlex.quote(branch)}" if branch else ""
+    return shell(f"git push {'-u ' if set_upstream else ''}{shlex.quote(remote)}{branch_part}", cwd)
+
+
+@mcp.tool()
+def git_stash(action: str = "push", message: Optional[str] = None, cwd: str = ".") -> str:
+    require_scope("workspace:write")
+    if action not in {"push", "pop", "list", "drop"}:
+        raise ValueError("action must be push, pop, list, or drop")
+    extra = f" -m {shlex.quote(message)}" if action == "push" and message else ""
+    return shell(f"git stash {action}{extra}", cwd)
+
+
+@mcp.tool()
+def git_worktree(action: str, path: Optional[str] = None, branch: Optional[str] = None, cwd: str = ".") -> str:
+    """List, add, or remove Git worktrees. Added paths must be in the assigned workspace."""
+    require_scope("workspace:write")
+    if action == "list":
+        return shell("git worktree list --porcelain", cwd)
+    if action == "add":
+        if not path or not branch:
+            raise ValueError("add requires path and branch")
+        target = resolve_path(path)
+        return shell(f"git worktree add {shlex.quote(str(target))} {shlex.quote(branch)}", cwd)
+    if action == "remove":
+        if not path:
+            raise ValueError("remove requires path")
+        target = resolve_path(path)
+        return shell(f"git worktree remove {shlex.quote(str(target))}", cwd)
+    raise ValueError("action must be list, add, or remove")
+
+
+@mcp.tool()
+def http_request(
+    url: str,
+    method: str = "GET",
+    headers: Optional[dict[str, str]] = None,
+    body: Optional[str] = None,
+    timeout_seconds: int = 20,
+) -> str:
+    """Make an HTTP request with method, headers, and optional text/JSON body. Response headers, status, timing, and bounded body are returned."""
+    require_scope("network:fetch")
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("Only http and https URLs are supported")
+    started = time.monotonic()
+    request = urllib.request.Request(url, method=method.upper(), headers=headers or {}, data=body.encode("utf-8") if body is not None else None)
+    try:
+        with urllib.request.urlopen(request, timeout=min(max(timeout_seconds, 1), 120)) as response:
+            payload = response.read(150_000)
+            return _format_browser_result({"url": response.url, "status": response.status, "headers": dict(response.headers.items()), "elapsed_ms": round((time.monotonic() - started) * 1000, 1), "body": payload.decode("utf-8", errors="replace"), "truncated": response.length is not None and response.length > len(payload)})
+    except urllib.error.HTTPError as exc:
+        return _format_browser_result({"url": url, "status": exc.code, "headers": dict(exc.headers.items()), "elapsed_ms": round((time.monotonic() - started) * 1000, 1), "body": exc.read(150_000).decode("utf-8", errors="replace")})
+
+
+@mcp.tool()
+def http_download(url: str, destination: str, timeout_seconds: int = 60, max_bytes: int = 20_000_000) -> str:
+    """Download a bounded HTTP response into the workspace and return its hash."""
+    require_scope("network:fetch")
+    require_scope("workspace:write")
+    target = resolve_path(destination)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with urllib.request.urlopen(url, timeout=min(max(timeout_seconds, 1), 120)) as response:
+        data = response.read(min(max(max_bytes, 1), 100_000_000) + 1)
+        if len(data) > max_bytes:
+            raise ValueError("Download exceeded max_bytes")
+        target.write_bytes(data)
+        return _format_browser_result({"url": response.url, "status": response.status, "path": str(target), "size_bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+
+
+@mcp.tool()
+def http_upload(url: str, source_file: str, method: str = "PUT", headers: Optional[dict[str, str]] = None, timeout_seconds: int = 60) -> str:
+    """Upload a workspace file as a raw HTTP request body."""
+    require_scope("network:fetch")
+    source = resolve_path(source_file)
+    request = urllib.request.Request(url, method=method.upper(), headers=headers or {}, data=source.read_bytes())
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(request, timeout=min(max(timeout_seconds, 1), 120)) as response:
+            return _format_browser_result({"url": response.url, "status": response.status, "headers": dict(response.headers.items()), "elapsed_ms": round((time.monotonic() - started) * 1000, 1), "body": response.read(150_000).decode("utf-8", errors="replace")})
+    except urllib.error.HTTPError as exc:
+        return _format_browser_result({"url": url, "status": exc.code, "headers": dict(exc.headers.items()), "elapsed_ms": round((time.monotonic() - started) * 1000, 1), "body": exc.read(150_000).decode("utf-8", errors="replace")})
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def dns_lookup(hostname: str) -> str:
+    """Resolve a hostname to IP addresses."""
+    require_scope("network:fetch")
+    results = sorted({entry[4][0] for entry in socket.getaddrinfo(hostname, None)})
+    return _format_browser_result({"hostname": hostname, "addresses": results})
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def tcp_check(hostname: str, port: int, timeout_seconds: int = 5) -> str:
+    """Check TCP connectivity and report latency."""
+    require_scope("network:fetch")
+    started = time.monotonic()
+    try:
+        with socket.create_connection((hostname, port), timeout=min(max(timeout_seconds, 1), 30)):
+            return _format_browser_result({"hostname": hostname, "port": port, "reachable": True, "elapsed_ms": round((time.monotonic() - started) * 1000, 1)})
+    except OSError as exc:
+        return _format_browser_result({"hostname": hostname, "port": port, "reachable": False, "error": str(exc), "elapsed_ms": round((time.monotonic() - started) * 1000, 1)})
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def tls_certificate(hostname: str, port: int = 443, timeout_seconds: int = 10) -> str:
+    """Inspect a TLS certificate and protocol for a host."""
+    require_scope("network:fetch")
+    context = ssl.create_default_context()
+    with socket.create_connection((hostname, port), timeout=min(max(timeout_seconds, 1), 30)) as raw:
+        with context.wrap_socket(raw, server_hostname=hostname) as secure:
+            return _format_browser_result({"hostname": hostname, "port": port, "protocol": secure.version(), "cipher": secure.cipher(), "certificate": secure.getpeercert()})
+
+
+@mcp.tool()
+async def browser_session_upload(session_id: str, selector: str, files: list[str]) -> str:
+    """Upload one or more workspace files through a file input in a persistent browser session."""
+    require_scope("workspace:read")
+    record = _get_browser_session(session_id)
+    paths = [str(resolve_path(path)) for path in files]
+    await record.page.locator(selector).set_input_files(paths)
+    return _format_browser_result({"session_id": session_id, "selector": selector, "files": paths, "url": record.page.url})
+
+
+@mcp.tool()
+async def browser_session_frame_evaluate(session_id: str, frame_selector: str, script: str) -> str:
+    """Evaluate JavaScript inside a selected iframe in a persistent browser session."""
+    require_scope("browser:use")
+    record = _get_browser_session(session_id)
+    frame = record.page.frame_locator(frame_selector)
+    result = await frame.locator("html").evaluate(script)
+    return _format_browser_result({"session_id": session_id, "frame_selector": frame_selector, "result": result})
+
+
+@mcp.tool()
+async def browser_session_route(session_id: str, url_pattern: str, action: str = "abort", fulfill_body: Optional[str] = None, status: int = 200) -> str:
+    """Persistently intercept browser-session requests: abort them or fulfill them with a controlled text response."""
+    require_scope("browser:use")
+    record = _get_browser_session(session_id)
+    if action not in {"abort", "fulfill"}:
+        raise ValueError("action must be abort or fulfill")
+
+    async def handler(route):
+        if action == "abort":
+            await route.abort()
+        else:
+            await route.fulfill(status=status, body=fulfill_body or "", content_type="text/plain")
+
+    await record.context.route(url_pattern, handler)
+    return _format_browser_result({"session_id": session_id, "url_pattern": url_pattern, "action": action})
+
+
+@mcp.tool()
+async def browser_session_trace(session_id: str, destination: str) -> str:
+    """Export a Playwright trace ZIP for the persistent session into the workspace, then start a new trace segment."""
+    require_scope("workspace:write")
+    record = _get_browser_session(session_id)
+    target = resolve_path(destination)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    await record.context.tracing.stop(path=str(target))
+    await record.context.tracing.start(screenshots=False, snapshots=True, sources=True)
+    return _format_browser_result({"session_id": session_id, "path": str(target), "size_bytes": target.stat().st_size})
+
+
+@mcp.tool()
+async def browser_session_import_storage(session_id: str, local_storage: Optional[dict[str, str]] = None, session_storage: Optional[dict[str, str]] = None) -> str:
+    """Set localStorage and sessionStorage values in the current persistent browser-session page."""
+    require_scope("browser:use")
+    record = _get_browser_session(session_id)
+    await record.page.evaluate("""({localStorageValues, sessionStorageValues}) => {
+        for (const [key, value] of Object.entries(localStorageValues || {})) localStorage.setItem(key, value);
+        for (const [key, value] of Object.entries(sessionStorageValues || {})) sessionStorage.setItem(key, value);
+    }""", {"localStorageValues": local_storage or {}, "sessionStorageValues": session_storage or {}})
+    return _format_browser_result({"session_id": session_id, "local_storage_keys": sorted((local_storage or {}).keys()), "session_storage_keys": sorted((session_storage or {}).keys())})
+
+
+@mcp.tool()
+def database_query(engine: str, query: str, database: Optional[str] = None, secret_ref: Optional[str] = None, timeout_seconds: int = 30) -> str:
+    """Run a SQLite query against a workspace database or a PostgreSQL query using a named secret connection URL. Use only for trusted development databases."""
+    require_scope("database:use")
+    timeout = min(max(timeout_seconds, 1), 120)
+    if engine == "sqlite":
+        if not database:
+            raise ValueError("SQLite requires a workspace database path")
+        path = resolve_path(database)
+        result = subprocess.run(["sqlite3", "-json", str(path), query], text=True, capture_output=True, timeout=timeout)
+    elif engine == "postgres":
+        if not secret_ref:
+            raise ValueError("Postgres requires a secret_ref containing its connection URL")
+        connection = _secret_values([secret_ref])[secret_ref]
+        result = subprocess.run(["psql", connection, "--no-psqlrc", "--tuples-only", "--no-align", "-c", query], text=True, capture_output=True, timeout=timeout)
+    else:
+        raise ValueError("engine must be sqlite or postgres")
+    return _format_browser_result({"engine": engine, "exit_code": result.returncode, "stdout": result.stdout[:MAX_OUTPUT], "stderr": result.stderr[:MAX_OUTPUT]})
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def compose_status(cwd: str = ".") -> str:
+    """Return Docker Compose service state for a project."""
+    require_scope("deploy:run")
+    return shell("docker compose ps --all", cwd)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def compose_logs(service: Optional[str] = None, tail: int = 200, cwd: str = ".") -> str:
+    """Return bounded recent Docker Compose logs."""
+    require_scope("deploy:run")
+    suffix = f" {shlex.quote(service)}" if service else ""
+    return shell(f"docker compose logs --tail {min(max(tail, 1), 2000)} --no-color{suffix}", cwd)
+
+
+@mcp.tool()
+def compose_restart(services: Optional[list[str]] = None, cwd: str = ".") -> str:
+    """Restart all or selected Docker Compose services."""
+    require_scope("deploy:run")
+    require_scope("workspace:write")
+    suffix = " ".join(shlex.quote(service) for service in services or [])
+    return shell(f"docker compose restart {suffix}".rstrip(), cwd)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def wait_for_http_health(url: str, expected_status: int = 200, timeout_seconds: int = 60) -> str:
+    """Poll an HTTP endpoint until it returns the expected status or times out."""
+    require_scope("deploy:run")
+    deadline = time.monotonic() + min(max(timeout_seconds, 1), 300)
+    last_status: Optional[int] = None
+    last_error: Optional[str] = None
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=5) as response:
+                last_status = response.status
+                if last_status == expected_status:
+                    return _format_browser_result({"healthy": True, "url": url, "status": last_status})
+        except urllib.error.HTTPError as exc:
+            last_status = exc.code
+        except OSError as exc:
+            last_error = str(exc)
+        time.sleep(1)
+    return _format_browser_result({"healthy": False, "url": url, "expected_status": expected_status, "last_status": last_status, "last_error": last_error})
 
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")

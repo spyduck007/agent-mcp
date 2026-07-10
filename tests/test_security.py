@@ -4,6 +4,8 @@ import importlib
 import os
 import tempfile
 import unittest
+import base64
+import json
 from pathlib import Path
 
 
@@ -42,6 +44,24 @@ class SecurityBoundaryTests(unittest.TestCase):
         first = self.server.session_state()
         self.assertEqual(first.subject, "local-dev")
         self.assertEqual(first.current_project, self.workspace)
+
+    def test_binary_atomic_and_diff_primitives(self) -> None:
+        payload = b"\x00agent-mcp\xff"
+        result = json.loads(self.server.write_binary_file("artifact.bin", base64.b64encode(payload).decode()))
+        self.assertEqual(result["size_bytes"], len(payload))
+        binary = json.loads(self.server.read_binary_file("artifact.bin"))
+        self.assertEqual(base64.b64decode(binary["data_base64"]), payload)
+        digest = json.loads(self.server.file_hash("artifact.bin"))
+        self.assertEqual(digest["digest"], result["sha256"])
+
+        self.server.atomic_write_file("left.txt", "one\ntwo\n")
+        self.server.atomic_write_file("right.txt", "one\nthree\n")
+        self.assertIn("-two", self.server.diff_files("left.txt", "right.txt"))
+
+    def test_advanced_command_uses_argv_without_shell(self) -> None:
+        result = json.loads(self.server.run_command_advanced(["python", "-c", "print('argv-ok')"]))
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["stdout"].strip(), "argv-ok")
 
 
 if __name__ == "__main__":
