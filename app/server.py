@@ -246,6 +246,140 @@ def require_scope(scope: str) -> None:
         raise PermissionError(f"OAuth scope required: {scope}")
 
 
+TOOL_SCOPE_REQUIREMENTS: dict[str, tuple[str, ...]] = {
+    "append_file": ("workspace:read", "workspace:write"),
+    "apply_patch": ("workspace:read", "workspace:write"),
+    "atomic_write_file": ("workspace:read", "workspace:write"),
+    "audit_events": ("workspace:read",),
+    "browser_accessibility_snapshot": ("browser:use",),
+    "browser_assert": ("browser:use",),
+    "browser_check_errors": ("browser:use",),
+    "browser_dom_snapshot": ("browser:use",),
+    "browser_evaluate": ("browser:use",),
+    "browser_form_snapshot": ("browser:use",),
+    "browser_inspect": ("browser:use",),
+    "browser_interact": ("browser:use",),
+    "browser_network_trace": ("browser:use",),
+    "browser_session_accessibility_snapshot": ("browser:use",),
+    "browser_session_close": ("browser:use",),
+    "browser_session_dom_snapshot": ("browser:use",),
+    "browser_session_download": ("browser:use", "workspace:read", "workspace:write"),
+    "browser_session_evaluate": ("browser:use",),
+    "browser_session_frame_evaluate": ("browser:use",),
+    "browser_session_import_storage": ("browser:use",),
+    "browser_session_inspect": ("browser:use",),
+    "browser_session_interact": ("browser:use",),
+    "browser_session_list": ("browser:use",),
+    "browser_session_logs": ("browser:use",),
+    "browser_session_open": ("browser:use",),
+    "browser_session_popup": ("browser:use",),
+    "browser_session_route": ("browser:use",),
+    "browser_session_trace": ("browser:use", "workspace:read", "workspace:write"),
+    "browser_session_upload": ("browser:use", "workspace:read"),
+    "browser_storage_state": ("browser:use",),
+    "chmod_path": ("workspace:read", "workspace:write"),
+    "close_project": ("workspace:read",),
+    "command_history": ("command:run",),
+    "compose_logs": ("command:run", "deploy:run", "workspace:read"),
+    "compose_restart": ("command:run", "deploy:run", "workspace:read", "workspace:write"),
+    "compose_status": ("command:run", "deploy:run", "workspace:read"),
+    "copy_path": ("workspace:read", "workspace:write"),
+    "create_directory": ("workspace:read", "workspace:write"),
+    "create_snapshot": ("workspace:read", "workspace:write"),
+    "create_symlink": ("workspace:read", "workspace:write"),
+    "database_query": ("command:run", "database:use", "workspace:read"),
+    "delete_path": ("workspace:read", "workspace:write"),
+    "deployment_apply": ("deploy:run", "workspace:read", "workspace:write"),
+    "deployment_preflight": ("deploy:run", "workspace:read", "workspace:write"),
+    "deployment_rollback": ("deploy:run", "workspace:read", "workspace:write"),
+    "diff_files": ("workspace:read",),
+    "dns_lookup": ("network:fetch",),
+    "environment_info": ("command:run", "workspace:read"),
+    "fetch_url": ("network:fetch",),
+    "file_hash": ("workspace:read",),
+    "find_file": ("workspace:read",),
+    "find_symbol": ("workspace:read",),
+    "forget_process": ("command:run",),
+    "get_process_output": ("command:run",),
+    "get_project_info": ("workspace:read",),
+    "git_blame": ("command:run", "workspace:read"),
+    "git_branch": ("command:run", "workspace:read"),
+    "git_checkout": ("command:run", "workspace:read", "workspace:write"),
+    "git_commit": ("command:run", "workspace:read", "workspace:write"),
+    "git_diff": ("command:run", "workspace:read"),
+    "git_fetch": ("command:run", "workspace:read"),
+    "git_log": ("command:run", "workspace:read"),
+    "git_pull": ("command:run", "workspace:read", "workspace:write"),
+    "git_push": ("command:run", "workspace:read", "workspace:write"),
+    "git_restore": ("command:run", "workspace:read", "workspace:write"),
+    "git_show": ("command:run", "workspace:read"),
+    "git_staged_diff": ("command:run", "workspace:read"),
+    "git_stash": ("command:run", "workspace:read", "workspace:write"),
+    "git_status": ("command:run", "workspace:read"),
+    "git_worktree": ("command:run", "workspace:read", "workspace:write"),
+    "github_create_pull_request": ("github:write", "secrets:use"),
+    "github_push_branch": ("github:write", "secrets:use", "workspace:read", "workspace:write"),
+    "http_download": ("network:fetch", "workspace:read", "workspace:write"),
+    "http_request": ("network:fetch",),
+    "http_upload": ("network:fetch", "workspace:read"),
+    "insert_at_line": ("workspace:read", "workspace:write"),
+    "install_apt_packages": ("admin:install", "command:run", "workspace:read"),
+    "install_node_packages": ("admin:install", "command:run", "workspace:read", "workspace:write"),
+    "install_project_dependencies": ("admin:install", "command:run", "workspace:read", "workspace:write"),
+    "install_python_packages": ("admin:install", "command:run", "workspace:read"),
+    "list_files": ("workspace:read",),
+    "list_processes": ("command:run",),
+    "list_projects": ("workspace:read",),
+    "list_snapshots": ("workspace:read",),
+    "move_path": ("workspace:read", "workspace:write"),
+    "open_project": ("workspace:read",),
+    "port_owner": ("command:run",),
+    "project_checkpoint": ("workspace:read", "workspace:write"),
+    "project_context": ("workspace:read",),
+    "project_memory_get": ("workspace:read",),
+    "project_memory_set": ("workspace:read", "workspace:write"),
+    "project_verify": ("command:run", "workspace:read"),
+    "pwd": ("workspace:read",),
+    "read_binary_file": ("workspace:read",),
+    "read_file": ("workspace:read",),
+    "read_files": ("workspace:read",),
+    "read_symlink": ("workspace:read",),
+    "regex_search": ("workspace:read",),
+    "replace_in_file": ("workspace:read", "workspace:write"),
+    "replace_lines": ("workspace:read", "workspace:write"),
+    "restore_snapshot": ("workspace:read", "workspace:write"),
+    "run_command": ("command:run", "workspace:read"),
+    "run_command_advanced": ("command:run", "workspace:read"),
+    "search_all_matches": ("workspace:read",),
+    "search_files": ("workspace:read",),
+    "self_improvement_readiness": ("workspace:read",),
+    "send_process_input": ("command:run",),
+    "signal_process": ("command:run",),
+    "start_process": ("command:run", "workspace:read"),
+    "start_process_advanced": ("command:run", "workspace:read"),
+    "stat_path": ("workspace:read",),
+    "stop_process": ("command:run",),
+    "switch_project": ("workspace:read",),
+    "tcp_check": ("network:fetch",),
+    "tls_certificate": ("network:fetch",),
+    "tree": ("workspace:read",),
+    "wait_for_http_health": ("deploy:run", "workspace:read"),
+    "wait_for_process_output": ("command:run",),
+    "write_binary_file": ("workspace:read", "workspace:write"),
+    "write_file": ("workspace:read", "workspace:write"),
+}
+
+
+def authorize_tool(tool_name: str) -> None:
+    """Enforce the documented OAuth scope contract for a public MCP tool."""
+    try:
+        required = TOOL_SCOPE_REQUIREMENTS[tool_name]
+    except KeyError as exc:
+        raise RuntimeError(f"No authorization contract is defined for MCP tool: {tool_name}") from exc
+    for scope in required:
+        require_scope(scope)
+
+
 def session_state() -> UserSessionState:
     subject, _scopes = _identity()
     with SESSION_LOCK:
@@ -363,6 +497,7 @@ def shell(command: str, cwd: str = ".", timeout_seconds: int = DEFAULT_TIMEOUT_S
 @mcp.tool()
 def open_project(path: str, name: str | None = None) -> str:
     """Open a project directory and make it the active project."""
+    authorize_tool("open_project")
     target = resolve_path(path)
 
     if not target.exists():
@@ -380,6 +515,7 @@ def open_project(path: str, name: str | None = None) -> str:
 @mcp.tool()
 def switch_project(name: str) -> str:
     """Switch to a previously opened project."""
+    authorize_tool("switch_project")
     state = session_state()
     if name not in state.projects:
         raise ValueError(f"Unknown project: {name}")
@@ -391,6 +527,7 @@ def switch_project(name: str) -> str:
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def list_projects() -> str:
     """List opened projects."""
+    authorize_tool("list_projects")
     state = session_state()
     if not state.projects:
         return "No projects opened."
@@ -403,6 +540,7 @@ def list_projects() -> str:
 @mcp.tool()
 def close_project(name: str) -> str:
     """Forget an opened project."""
+    authorize_tool("close_project")
     state = session_state()
 
     if name not in state.projects:
@@ -422,12 +560,14 @@ def close_project(name: str) -> str:
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def pwd() -> str:
     """Return the active project directory."""
+    authorize_tool("pwd")
     state = session_state()
     return f"{state.current_project_name}: {state.current_project}"
 
 
 @mcp.tool()
 def write_file(file_path: str, contents: str) -> str:
+    authorize_tool("write_file")
     require_scope("workspace:write")
     target = resolve_path(file_path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -437,6 +577,7 @@ def write_file(file_path: str, contents: str) -> str:
 
 @mcp.tool()
 def append_file(file_path: str, contents: str) -> str:
+    authorize_tool("append_file")
     require_scope("workspace:write")
     target = resolve_path(file_path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -449,6 +590,7 @@ def append_file(file_path: str, contents: str) -> str:
 
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def read_file(file_path: str, start_line: int = 1, max_lines: int = 300) -> str:
+    authorize_tool("read_file")
     target = resolve_path(file_path)
 
     if not target.exists():
@@ -465,6 +607,7 @@ def read_file(file_path: str, start_line: int = 1, max_lines: int = 300) -> str:
 
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def read_files(file_paths: list[str]) -> str:
+    authorize_tool("read_files")
     return "\n\n".join(f"--- {path} ---\n{read_file(path)}" for path in file_paths)
 
 
@@ -475,6 +618,7 @@ def replace_in_file(
     new_text: str,
     expected_replacements: int | None = None,
 ) -> str:
+    authorize_tool("replace_in_file")
     require_scope("workspace:write")
     target = resolve_path(file_path)
     text = target.read_text(encoding="utf-8")
@@ -492,6 +636,7 @@ def replace_in_file(
 
 @mcp.tool()
 def replace_lines(file_path: str, start_line: int, end_line: int, new_content: str) -> str:
+    authorize_tool("replace_lines")
     require_scope("workspace:write")
     target = resolve_path(file_path)
     lines = target.read_text(encoding="utf-8").splitlines()
@@ -506,6 +651,7 @@ def replace_lines(file_path: str, start_line: int, end_line: int, new_content: s
 
 @mcp.tool()
 def insert_at_line(file_path: str, line_number: int, content: str) -> str:
+    authorize_tool("insert_at_line")
     require_scope("workspace:write")
     target = resolve_path(file_path)
     lines = target.read_text(encoding="utf-8").splitlines()
@@ -519,6 +665,7 @@ def insert_at_line(file_path: str, line_number: int, content: str) -> str:
 
 @mcp.tool()
 def copy_path(source: str, destination: str) -> str:
+    authorize_tool("copy_path")
     require_scope("workspace:write")
     src = resolve_path(source)
     dst = resolve_path(destination)
@@ -534,6 +681,7 @@ def copy_path(source: str, destination: str) -> str:
 
 @mcp.tool()
 def move_path(source: str, destination: str) -> str:
+    authorize_tool("move_path")
     require_scope("workspace:write")
     src = resolve_path(source)
     dst = resolve_path(destination)
@@ -544,6 +692,7 @@ def move_path(source: str, destination: str) -> str:
 
 @mcp.tool()
 def delete_path(path: str) -> str:
+    authorize_tool("delete_path")
     require_scope("workspace:write")
     target = resolve_path(path)
 
@@ -557,6 +706,7 @@ def delete_path(path: str) -> str:
 
 @mcp.tool()
 def create_directory(directory: str) -> str:
+    authorize_tool("create_directory")
     require_scope("workspace:write")
     target = resolve_path(directory)
     target.mkdir(parents=True, exist_ok=True)
@@ -565,6 +715,7 @@ def create_directory(directory: str) -> str:
 
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def list_files(directory: str = ".", recursive: bool = True, max_entries: int = 800) -> str:
+    authorize_tool("list_files")
     root = resolve_path(directory)
     iterator = root.rglob("*") if recursive else root.iterdir()
 
@@ -586,6 +737,7 @@ def list_files(directory: str = ".", recursive: bool = True, max_entries: int = 
 
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def tree(directory: str = ".", depth: int = 3, max_entries: int = 400) -> str:
+    authorize_tool("tree")
     root = resolve_path(directory)
     output = [f"{root}/"]
     count = 0
@@ -617,6 +769,7 @@ def tree(directory: str = ".", depth: int = 3, max_entries: int = 400) -> str:
 
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def find_file(pattern: str, directory: str = ".", max_results: int = 200) -> str:
+    authorize_tool("find_file")
     root = resolve_path(directory)
     results = []
 
@@ -631,6 +784,7 @@ def find_file(pattern: str, directory: str = ".", max_results: int = 200) -> str
 
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def search_files(query: str, directory: str = ".", max_results: int = 200) -> str:
+    authorize_tool("search_files")
     root = resolve_path(directory)
     results = []
 
@@ -657,6 +811,7 @@ def search_files(query: str, directory: str = ".", max_results: int = 200) -> st
 
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def regex_search(pattern: str, directory: str = ".", max_results: int = 200) -> str:
+    authorize_tool("regex_search")
     root = resolve_path(directory)
     rx = re.compile(pattern)
     results = []
@@ -684,6 +839,7 @@ def regex_search(pattern: str, directory: str = ".", max_results: int = 200) -> 
 
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def find_symbol(name: str, directory: str = ".", max_results: int = 100) -> str:
+    authorize_tool("find_symbol")
     pattern = (
         rf"^\s*(def|class|function|const|let|var|async function|export function|export class)\s+{re.escape(name)}\b"
     )
@@ -692,6 +848,7 @@ def find_symbol(name: str, directory: str = ".", max_results: int = 100) -> str:
 
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def stat_path(path: str) -> str:
+    authorize_tool("stat_path")
     target = resolve_path(path)
     stat = target.stat()
 
@@ -707,11 +864,13 @@ def stat_path(path: str) -> str:
 
 @mcp.tool()
 def run_command(command: str, cwd: str = ".", timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS) -> str:
+    authorize_tool("run_command")
     return shell(command, cwd, timeout_seconds)
 
 
 @mcp.tool()
 def command_history(max_entries: int = 50) -> str:
+    authorize_tool("command_history")
     return "\n".join(session_state().command_history[-max_entries:])
 
 
@@ -743,6 +902,7 @@ def _read_process_output(process_id: str, record: ProcessRecord) -> None:
 @mcp.tool()
 def start_process(command: str, cwd: str = ".", name: str | None = None) -> str:
     """Start a long-running process and capture output in the background without blocking."""
+    authorize_tool("start_process")
     working_dir = resolve_path(cwd)
     process_id = (name or str(uuid.uuid4())[:8]).strip()
 
@@ -803,6 +963,7 @@ def start_process(command: str, cwd: str = ".", name: str | None = None) -> str:
 @mcp.tool()
 def list_processes() -> str:
     """List tracked background processes."""
+    authorize_tool("list_processes")
     rows = []
 
     with PROCESS_LOCK:
@@ -829,6 +990,7 @@ def list_processes() -> str:
 @mcp.tool()
 def get_process_output(process_id: str, max_lines: int = 300, since_line: int | None = None) -> str:
     """Return captured process output without blocking. Use since_line for incremental reads."""
+    authorize_tool("get_process_output")
     with PROCESS_LOCK:
         record = session_state().processes.get(process_id)
         if record is None:
@@ -871,6 +1033,7 @@ def wait_for_process_output(
     process_id: str, text: str, timeout_seconds: int = 30, since_line: int | None = None
 ) -> str:
     """Wait until text appears in background process output, without blocking forever."""
+    authorize_tool("wait_for_process_output")
     deadline = time.time() + min(max(timeout_seconds, 1), 300)
     record: ProcessRecord | None = None
 
@@ -921,6 +1084,7 @@ def wait_for_process_output(
 @mcp.tool()
 def stop_process(process_id: str, kill: bool = False) -> str:
     """Stop a tracked process. Uses terminate first unless kill=True."""
+    authorize_tool("stop_process")
     with PROCESS_LOCK:
         record = session_state().processes.get(process_id)
 
@@ -946,6 +1110,7 @@ def stop_process(process_id: str, kill: bool = False) -> str:
 @mcp.tool()
 def forget_process(process_id: str) -> str:
     """Remove a stopped process from the tracked process list."""
+    authorize_tool("forget_process")
     with PROCESS_LOCK:
         record = session_state().processes.get(process_id)
 
@@ -962,6 +1127,7 @@ def forget_process(process_id: str) -> str:
 
 @mcp.tool()
 def apply_patch(patch: str, cwd: str = ".") -> str:
+    authorize_tool("apply_patch")
     require_scope("workspace:write")
     working_dir = resolve_path(cwd)
 
@@ -979,26 +1145,31 @@ def apply_patch(patch: str, cwd: str = ".") -> str:
 
 @mcp.tool()
 def git_status(cwd: str = ".") -> str:
+    authorize_tool("git_status")
     return shell("git status --short", cwd)
 
 
 @mcp.tool()
 def git_diff(cwd: str = ".") -> str:
+    authorize_tool("git_diff")
     return shell("git diff", cwd)
 
 
 @mcp.tool()
 def git_log(cwd: str = ".", max_count: int = 10) -> str:
+    authorize_tool("git_log")
     return shell(f"git log --oneline -n {max_count}", cwd)
 
 
 @mcp.tool()
 def git_branch(cwd: str = ".") -> str:
+    authorize_tool("git_branch")
     return shell("git branch --show-current && git branch", cwd)
 
 
 @mcp.tool()
 def git_checkout(branch: str, create: bool = False, cwd: str = ".") -> str:
+    authorize_tool("git_checkout")
     safe_branch = shlex.quote(branch)
     command = f"git checkout {'-b ' if create else ''}{safe_branch}"
     return shell(command, cwd)
@@ -1006,18 +1177,21 @@ def git_checkout(branch: str, create: bool = False, cwd: str = ".") -> str:
 
 @mcp.tool()
 def git_commit(message: str, cwd: str = ".") -> str:
+    authorize_tool("git_commit")
     safe_message = shlex.quote(message)
     return shell(f"git add . && git commit -m {safe_message}", cwd)
 
 
 @mcp.tool()
 def git_restore(path: str = ".", cwd: str = ".") -> str:
+    authorize_tool("git_restore")
     safe_path = shlex.quote(path)
     return shell(f"git restore {safe_path}", cwd)
 
 
 @mcp.tool()
 def fetch_url(url: str, timeout_seconds: int = 10) -> str:
+    authorize_tool("fetch_url")
     require_scope("network:fetch")
     request = urllib.request.Request(url, headers={"User-Agent": "coding-agent-mcp"})
 
@@ -1571,6 +1745,7 @@ async def browser_inspect(
     text_limit: int = 8000,
 ) -> str:
     """Inspect a page: title, final URL, headings, links, buttons, inputs, and visible body text."""
+    authorize_tool("browser_inspect")
     async_playwright = _load_playwright()
     target_url = _normalize_url(url)
     timeout_ms = min(max(timeout_seconds, 1), 120) * 1000
@@ -1594,6 +1769,7 @@ async def browser_check_errors(
     timeout_seconds: int = 15,
 ) -> str:
     """Open a page and collect console errors, page exceptions, failed requests, and non-2xx/3xx responses."""
+    authorize_tool("browser_check_errors")
     async_playwright = _load_playwright()
     target_url = _normalize_url(url)
     timeout_ms = min(max(timeout_seconds, 1), 120) * 1000
@@ -1652,6 +1828,7 @@ async def browser_interact(
     text_limit: int = 8000,
 ) -> str:
     """Run browser actions from a fresh page and return a text DOM summary. Locators can use selector, role/name, text, label, placeholder, test_id, alt_text, or title. Supported actions: click, dblclick, fill, type, press, hover, check, uncheck, select, focus, blur, wait_for_selector, wait_for_text, wait_for_url, wait, goto, reload, assert_text, assert_selector, assert_count, assert_url, assert_title, evaluate."""
+    authorize_tool("browser_interact")
     async_playwright = _load_playwright()
     target_url = _normalize_url(url)
     timeout_ms = _bounded_timeout_ms(timeout_seconds)
@@ -1695,6 +1872,7 @@ async def browser_evaluate(
     timeout_seconds: int = 20,
 ) -> str:
     """Evaluate JavaScript on a page and return the JSON-serializable result."""
+    authorize_tool("browser_evaluate")
     async_playwright = _load_playwright()
     target_url = _normalize_url(url)
     timeout_ms = min(max(timeout_seconds, 1), 120) * 1000
@@ -1729,6 +1907,7 @@ async def browser_dom_snapshot(
     include_attributes: bool = True,
 ) -> str:
     """Return a structured, text-only DOM snapshot focused on useful/interactive elements. No screenshots or images."""
+    authorize_tool("browser_dom_snapshot")
     async_playwright = _load_playwright()
     target_url = _normalize_url(url)
     timeout_ms = _bounded_timeout_ms(timeout_seconds)
@@ -1761,6 +1940,7 @@ async def browser_accessibility_snapshot(
     text_limit: int = 500,
 ) -> str:
     """Return a text-only accessibility-oriented snapshot: roles, names, fields, headings, links, landmarks, and controls."""
+    authorize_tool("browser_accessibility_snapshot")
     async_playwright = _load_playwright()
     target_url = _normalize_url(url)
     timeout_ms = _bounded_timeout_ms(timeout_seconds)
@@ -1790,6 +1970,7 @@ async def browser_form_snapshot(
     text_limit: int = 500,
 ) -> str:
     """Return form/action/field metadata for a page, including labels, names, placeholders, values, required and disabled flags."""
+    authorize_tool("browser_form_snapshot")
     async_playwright = _load_playwright()
     target_url = _normalize_url(url)
     timeout_ms = _bounded_timeout_ms(timeout_seconds)
@@ -1819,6 +2000,7 @@ async def browser_assert(
     timeout_seconds: int = 20,
 ) -> str:
     """Run optional actions and assertion actions against a fresh page. Assertion actions include assert_text, assert_selector, assert_count, assert_url, and assert_title."""
+    authorize_tool("browser_assert")
     async_playwright = _load_playwright()
     target_url = _normalize_url(url)
     timeout_ms = _bounded_timeout_ms(timeout_seconds)
@@ -1864,6 +2046,7 @@ async def browser_network_trace(
     max_events: int = 200,
 ) -> str:
     """Open a page, optionally run actions, and return request/response/failure/console traces as text JSON."""
+    authorize_tool("browser_network_trace")
     async_playwright = _load_playwright()
     target_url = _normalize_url(url)
     timeout_ms = _bounded_timeout_ms(timeout_seconds)
@@ -1953,6 +2136,7 @@ async def browser_storage_state(
     include_cookies: bool = True,
 ) -> str:
     """Return cookies, localStorage, and sessionStorage for a page after navigation."""
+    authorize_tool("browser_storage_state")
     async_playwright = _load_playwright()
     target_url = _normalize_url(url)
     timeout_ms = _bounded_timeout_ms(timeout_seconds)
@@ -1985,6 +2169,7 @@ async def browser_session_open(
     text_limit: int = 8000,
 ) -> str:
     """Open a persistent browser session for multi-step testing across MCP calls. Close it with browser_session_close."""
+    authorize_tool("browser_session_open")
     async_playwright = _load_playwright()
     target_url = _normalize_url(url)
     timeout_ms = _bounded_timeout_ms(timeout_seconds)
@@ -2020,6 +2205,7 @@ async def browser_session_open(
 @mcp.tool()
 def browser_session_list() -> str:
     """List open persistent browser sessions."""
+    authorize_tool("browser_session_list")
     require_scope("browser:use")
     sessions = []
     for session_id, record in session_state().browser_sessions.items():
@@ -2040,6 +2226,7 @@ def browser_session_list() -> str:
 @mcp.tool()
 async def browser_session_close(session_id: str) -> str:
     """Close a persistent browser session and free its browser process."""
+    authorize_tool("browser_session_close")
     record = _get_browser_session(session_id)
     session_state().browser_sessions.pop(session_id, None)
     await record.context.close()
@@ -2051,6 +2238,7 @@ async def browser_session_close(session_id: str) -> str:
 @mcp.tool()
 async def browser_session_inspect(session_id: str, text_limit: int = 8000) -> str:
     """Inspect the current page in a persistent browser session."""
+    authorize_tool("browser_session_inspect")
     record = _get_browser_session(session_id)
     result = await _collect_page_summary(record.page, include_text=True, text_limit=text_limit)
     result.update({"session_id": session_id})
@@ -2065,6 +2253,7 @@ async def browser_session_interact(
     text_limit: int = 8000,
 ) -> str:
     """Run actions in an existing persistent browser session and return the updated text DOM summary."""
+    authorize_tool("browser_session_interact")
     record = _get_browser_session(session_id)
     timeout_ms = _bounded_timeout_ms(timeout_seconds)
     record.page.set_default_timeout(timeout_ms)
@@ -2086,6 +2275,7 @@ async def browser_session_interact(
 @mcp.tool()
 async def browser_session_evaluate(session_id: str, script: str) -> str:
     """Evaluate JavaScript in an existing persistent browser session."""
+    authorize_tool("browser_session_evaluate")
     record = _get_browser_session(session_id)
     value = await record.page.evaluate(script)
     return _format_browser_result(
@@ -2102,6 +2292,7 @@ async def browser_session_dom_snapshot(
     include_attributes: bool = True,
 ) -> str:
     """Return a structured DOM snapshot for the current page in a persistent browser session."""
+    authorize_tool("browser_session_dom_snapshot")
     record = _get_browser_session(session_id)
     data = await _evaluate_dom_snapshot(
         record.page,
@@ -2121,6 +2312,7 @@ async def browser_session_accessibility_snapshot(
     text_limit: int = 500,
 ) -> str:
     """Return an accessibility-oriented snapshot for the current page in a persistent browser session."""
+    authorize_tool("browser_session_accessibility_snapshot")
     record = _get_browser_session(session_id)
     data = await _evaluate_accessibility_snapshot(
         record.page, _safe_int(element_limit, 250, 1, 2000), _safe_int(text_limit, 500, 1, 5000)
@@ -2132,6 +2324,7 @@ async def browser_session_accessibility_snapshot(
 @mcp.tool()
 def browser_session_logs(session_id: str, max_entries: int = 100) -> str:
     """Return recent console errors/warnings, page errors, failed requests, and bad responses for a persistent browser session."""
+    authorize_tool("browser_session_logs")
     require_scope("browser:use")
     record = _get_browser_session(session_id)
     limit = _safe_int(max_entries, 100, 1, BROWSER_LOG_LIMIT)
@@ -2153,6 +2346,7 @@ def browser_session_logs(session_id: str, max_entries: int = 100) -> str:
 
 @mcp.tool()
 def create_snapshot(name: str | None = None) -> str:
+    authorize_tool("create_snapshot")
     require_scope("workspace:write")
     snapshots = user_snapshot_root()
 
@@ -2172,6 +2366,7 @@ def create_snapshot(name: str | None = None) -> str:
 
 @mcp.tool()
 def restore_snapshot(snapshot_id: str) -> str:
+    authorize_tool("restore_snapshot")
     require_scope("workspace:write")
     source = (user_snapshot_root() / snapshot_id).resolve()
 
@@ -2199,6 +2394,7 @@ def restore_snapshot(snapshot_id: str) -> str:
 
 @mcp.tool()
 def list_snapshots() -> str:
+    authorize_tool("list_snapshots")
     require_scope("workspace:read")
     return "\n".join(sorted(path.name for path in user_snapshot_root().iterdir() if path.is_dir()))
 
@@ -2300,6 +2496,7 @@ def _verification_commands(root: Path) -> dict[str, list[list[str]]]:
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def project_context(max_files: int = 120) -> str:
     """Return grounded project context: detected stack, root files, Git state, available verification suites, stored notes, and the active safety policy."""
+    authorize_tool("project_context")
     require_scope("workspace:read")
     root = session_state().current_project
     markers = _project_markers(root)
@@ -2339,6 +2536,7 @@ def project_context(max_files: int = 120) -> str:
 @mcp.tool()
 def project_memory_set(key: str, value: str) -> str:
     """Persist a concise, user-approved project fact or decision outside the repository. Never store credentials or tokens here."""
+    authorize_tool("project_memory_set")
     require_scope("workspace:write")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,80}", key):
         raise ValueError("Memory key may contain only letters, digits, '.', '_' and '-'")
@@ -2354,6 +2552,7 @@ def project_memory_set(key: str, value: str) -> str:
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def project_memory_get(key: str | None = None) -> str:
     """Read one persistent project memory entry, or list available memory keys."""
+    authorize_tool("project_memory_get")
     require_scope("workspace:read")
     memory = _load_project_memory()
     if key is None:
@@ -2366,6 +2565,7 @@ def project_memory_get(key: str | None = None) -> str:
 @mcp.tool()
 def project_checkpoint(summary: str, next_steps: list[str], verification: dict[str, Any] | None = None) -> str:
     """Create a durable progress checkpoint outside the repository for long-running agent work."""
+    authorize_tool("project_checkpoint")
     require_scope("workspace:write")
     if len(summary) > 12_000 or len(next_steps) > 50:
         raise ValueError("Checkpoint is too large")
@@ -2388,6 +2588,7 @@ def project_checkpoint(summary: str, next_steps: list[str], verification: dict[s
 @mcp.tool()
 def project_verify(suites: list[str] | None = None, timeout_seconds: int = 300) -> str:
     """Run detected fixed verification suites (syntax, test, lint, typecheck, build, compose) and return grounded pass/fail evidence."""
+    authorize_tool("project_verify")
     require_scope("command:run")
     root = session_state().current_project
     available = _verification_commands(root)
@@ -2418,6 +2619,7 @@ def project_verify(suites: list[str] | None = None, timeout_seconds: int = 300) 
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def self_improvement_readiness() -> str:
     """Assess whether the active project is the isolated self-improvement checkout and report the branch, policy, verification, and credential prerequisites."""
+    authorize_tool("self_improvement_readiness")
     require_scope("workspace:read")
     root = session_state().current_project
     is_self_workspace = root.name == SELF_IMPROVEMENT_WORKSPACE
@@ -2442,6 +2644,7 @@ def self_improvement_readiness() -> str:
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def audit_events(max_entries: int = 100) -> str:
     """Return recent credential-free audit records for the authenticated identity."""
+    authorize_tool("audit_events")
     require_scope("workspace:read")
     target = _identity_storage_root(AUDIT_ROOT) / "events.jsonl"
     if not target.exists():
@@ -2453,6 +2656,7 @@ def audit_events(max_entries: int = 100) -> str:
 @mcp.tool()
 def deployment_preflight(cwd: str = ".") -> str:
     """Validate a Compose project before deployment: configuration, current service state, and a snapshot identifier for rollback."""
+    authorize_tool("deployment_preflight")
     require_scope("deploy:run")
     require_scope("workspace:write")
     root = resolve_path(cwd)
@@ -2477,6 +2681,7 @@ def deployment_apply(
     approval: str, services: list[str] | None = None, health_url: str | None = None, cwd: str = "."
 ) -> str:
     """Build and apply a Compose deployment. Requires the exact user approval phrase I_APPROVE_DEPLOYMENT and optional HTTP health evidence."""
+    authorize_tool("deployment_apply")
     require_scope("deploy:run")
     require_scope("workspace:write")
     if approval != "I_APPROVE_DEPLOYMENT":
@@ -2503,6 +2708,7 @@ def deployment_apply(
 @mcp.tool()
 def deployment_rollback(snapshot_id: str, approval: str, cwd: str = ".") -> str:
     """Restore a pre-deployment snapshot and re-apply Compose. Requires exact user approval I_APPROVE_ROLLBACK."""
+    authorize_tool("deployment_rollback")
     require_scope("deploy:run")
     require_scope("workspace:write")
     if approval != "I_APPROVE_ROLLBACK":
@@ -2520,6 +2726,7 @@ def deployment_rollback(snapshot_id: str, approval: str, cwd: str = ".") -> str:
 @mcp.tool()
 def github_push_branch(branch: str, secret_ref: str = "GITHUB_TOKEN", cwd: str = ".") -> str:
     """Push a branch using an ephemeral fine-grained GitHub token reference; the token is never persisted in Git config or returned."""
+    authorize_tool("github_push_branch")
     require_scope("github:write")
     require_scope("workspace:write")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./-]{0,180}", branch):
@@ -2551,6 +2758,7 @@ def github_create_pull_request(
     repository: str, head: str, title: str, body: str, base: str = "main", secret_ref: str = "GITHUB_TOKEN"
 ) -> str:
     """Create a GitHub pull request with an ephemeral fine-grained token. Requires repository format owner/name and github:write."""
+    authorize_tool("github_create_pull_request")
     require_scope("github:write")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
         raise ValueError("repository must be owner/name")
@@ -2581,6 +2789,7 @@ def github_create_pull_request(
 
 @mcp.tool()
 def get_project_info() -> str:
+    authorize_tool("get_project_info")
     state = session_state()
     markers = {
         "git": ".git",
@@ -2608,6 +2817,7 @@ def get_project_info() -> str:
 
 @mcp.tool()
 def environment_info() -> str:
+    authorize_tool("environment_info")
     commands = [
         "pwd",
         "python --version || true",
@@ -2623,6 +2833,7 @@ def environment_info() -> str:
 @mcp.tool()
 def install_apt_packages(packages: list[str]) -> str:
     """Install Debian packages inside the MCP container."""
+    authorize_tool("install_apt_packages")
     require_scope("admin:install")
     safe_packages = " ".join(shlex.quote(pkg) for pkg in packages)
 
@@ -2636,6 +2847,7 @@ def install_apt_packages(packages: list[str]) -> str:
 @mcp.tool()
 def install_python_packages(packages: list[str]) -> str:
     """Install Python packages globally inside the MCP container."""
+    authorize_tool("install_python_packages")
     require_scope("admin:install")
     safe_packages = " ".join(shlex.quote(pkg) for pkg in packages)
 
@@ -2649,6 +2861,7 @@ def install_python_packages(packages: list[str]) -> str:
 @mcp.tool()
 def install_node_packages(packages: list[str], dev: bool = False, package_manager: str = "npm") -> str:
     """Install Node packages in the active project."""
+    authorize_tool("install_node_packages")
     require_scope("workspace:write")
     safe_packages = " ".join(shlex.quote(pkg) for pkg in packages)
 
@@ -2667,6 +2880,7 @@ def install_node_packages(packages: list[str], dev: bool = False, package_manage
 @mcp.tool()
 def install_project_dependencies(package_manager: str | None = None) -> str:
     """Install dependencies for the active project."""
+    authorize_tool("install_project_dependencies")
     require_scope("workspace:write")
     if package_manager is None:
         project = session_state().current_project
@@ -2739,6 +2953,7 @@ def run_command_advanced(
     output_file: str | None = None,
 ) -> str:
     """Run an argv command without shell parsing. Supports controlled environment values, named secret injection, stdin, timeout, and optional captured-output file. Secret values are never returned by this tool."""
+    authorize_tool("run_command_advanced")
     require_scope("command:run")
     if not argv or not all(isinstance(part, str) and part for part in argv):
         raise ValueError("argv must contain one or more non-empty strings")
@@ -2792,6 +3007,7 @@ def run_command_advanced(
 @mcp.tool()
 def file_hash(file_path: str, algorithm: str = "sha256") -> str:
     """Return a cryptographic hash of a workspace file without returning its contents."""
+    authorize_tool("file_hash")
     if algorithm not in hashlib.algorithms_available:
         raise ValueError(f"Unsupported hash algorithm: {algorithm}")
     target = resolve_path(file_path)
@@ -2807,6 +3023,7 @@ def file_hash(file_path: str, algorithm: str = "sha256") -> str:
 @mcp.tool()
 def read_binary_file(file_path: str, max_bytes: int = 500_000) -> str:
     """Read a binary workspace file as bounded base64 data."""
+    authorize_tool("read_binary_file")
     target = resolve_path(file_path)
     limit = min(max(max_bytes, 1), MAX_READ_BYTES)
     data = target.read_bytes()[:limit]
@@ -2823,6 +3040,7 @@ def read_binary_file(file_path: str, max_bytes: int = 500_000) -> str:
 @mcp.tool()
 def write_binary_file(file_path: str, data_base64: str, expected_sha256: str | None = None) -> str:
     """Write base64 binary data atomically within the assigned workspace."""
+    authorize_tool("write_binary_file")
     require_scope("workspace:write")
     try:
         data = base64.b64decode(data_base64, validate=True)
@@ -2843,6 +3061,7 @@ def write_binary_file(file_path: str, data_base64: str, expected_sha256: str | N
 @mcp.tool()
 def atomic_write_file(file_path: str, contents: str, expected_sha256: str | None = None) -> str:
     """Atomically replace a text file, optionally only when its current SHA-256 matches."""
+    authorize_tool("atomic_write_file")
     require_scope("workspace:write")
     target = resolve_path(file_path)
     if expected_sha256 and target.exists():
@@ -2861,6 +3080,7 @@ def atomic_write_file(file_path: str, contents: str, expected_sha256: str | None
 @mcp.tool()
 def diff_files(left_path: str, right_path: str, context_lines: int = 3) -> str:
     """Return a unified diff between two workspace text files."""
+    authorize_tool("diff_files")
     left = resolve_path(left_path)
     right = resolve_path(right_path)
     context = min(max(context_lines, 0), 100)
@@ -2877,6 +3097,7 @@ def diff_files(left_path: str, right_path: str, context_lines: int = 3) -> str:
 @mcp.tool()
 def search_all_matches(query: str, directory: str = ".", max_results: int = 500, case_sensitive: bool = True) -> str:
     """Search every matching line across workspace text files, rather than only the first match per file."""
+    authorize_tool("search_all_matches")
     root = resolve_path(directory)
     needle = query if case_sensitive else query.lower()
     rows: list[str] = []
@@ -2903,6 +3124,7 @@ def search_all_matches(query: str, directory: str = ".", max_results: int = 500,
 @mcp.tool()
 def chmod_path(path: str, mode: str) -> str:
     """Set workspace file permissions using an octal mode such as '755'."""
+    authorize_tool("chmod_path")
     require_scope("workspace:write")
     if not re.fullmatch(r"[0-7]{3,4}", mode):
         raise ValueError("mode must be a 3- or 4-digit octal string")
@@ -2914,6 +3136,7 @@ def chmod_path(path: str, mode: str) -> str:
 @mcp.tool()
 def create_symlink(target: str, link_path: str) -> str:
     """Create a workspace-contained symbolic link. Both target and link must remain in the assigned workspace."""
+    authorize_tool("create_symlink")
     require_scope("workspace:write")
     source = resolve_path(target)
     link = resolve_path(link_path)
@@ -2927,6 +3150,7 @@ def create_symlink(target: str, link_path: str) -> str:
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def read_symlink(path: str) -> str:
     """Return a symbolic link target after validating that it remains in the workspace."""
+    authorize_tool("read_symlink")
     require_scope("workspace:read")
     state = session_state()
     raw = Path(path).expanduser()
@@ -2951,27 +3175,32 @@ def read_symlink(path: str) -> str:
 
 @mcp.tool()
 def git_staged_diff(cwd: str = ".") -> str:
+    authorize_tool("git_staged_diff")
     return shell("git diff --cached", cwd)
 
 
 @mcp.tool()
 def git_show(revision: str = "HEAD", cwd: str = ".") -> str:
+    authorize_tool("git_show")
     return shell(f"git show --stat --patch {shlex.quote(revision)}", cwd)
 
 
 @mcp.tool()
 def git_blame(file_path: str, start_line: int | None = None, end_line: int | None = None, cwd: str = ".") -> str:
+    authorize_tool("git_blame")
     line_range = "" if start_line is None else f" -L {max(start_line, 1)},{max(end_line or start_line, start_line)}"
     return shell(f"git blame{line_range} -- {shlex.quote(file_path)}", cwd)
 
 
 @mcp.tool()
 def git_fetch(remote: str = "origin", cwd: str = ".") -> str:
+    authorize_tool("git_fetch")
     return shell(f"git fetch {shlex.quote(remote)} --prune", cwd)
 
 
 @mcp.tool()
 def git_pull(remote: str = "origin", branch: str | None = None, rebase: bool = True, cwd: str = ".") -> str:
+    authorize_tool("git_pull")
     require_scope("workspace:write")
     branch_part = f" {shlex.quote(branch)}" if branch else ""
     return shell(f"git pull {'--rebase ' if rebase else ''}{shlex.quote(remote)}{branch_part}", cwd)
@@ -2979,6 +3208,7 @@ def git_pull(remote: str = "origin", branch: str | None = None, rebase: bool = T
 
 @mcp.tool()
 def git_push(remote: str = "origin", branch: str | None = None, set_upstream: bool = False, cwd: str = ".") -> str:
+    authorize_tool("git_push")
     require_scope("workspace:write")
     branch_part = f" {shlex.quote(branch)}" if branch else ""
     return shell(f"git push {'-u ' if set_upstream else ''}{shlex.quote(remote)}{branch_part}", cwd)
@@ -2986,6 +3216,7 @@ def git_push(remote: str = "origin", branch: str | None = None, set_upstream: bo
 
 @mcp.tool()
 def git_stash(action: str = "push", message: str | None = None, cwd: str = ".") -> str:
+    authorize_tool("git_stash")
     require_scope("workspace:write")
     if action not in {"push", "pop", "list", "drop"}:
         raise ValueError("action must be push, pop, list, or drop")
@@ -2996,6 +3227,7 @@ def git_stash(action: str = "push", message: str | None = None, cwd: str = ".") 
 @mcp.tool()
 def git_worktree(action: str, path: str | None = None, branch: str | None = None, cwd: str = ".") -> str:
     """List, add, or remove Git worktrees. Added paths must be in the assigned workspace."""
+    authorize_tool("git_worktree")
     require_scope("workspace:write")
     if action == "list":
         return shell("git worktree list --porcelain", cwd)
@@ -3021,6 +3253,7 @@ def http_request(
     timeout_seconds: int = 20,
 ) -> str:
     """Make an HTTP request with method, headers, and optional text/JSON body. Response headers, status, timing, and bounded body are returned."""
+    authorize_tool("http_request")
     require_scope("network:fetch")
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
@@ -3057,6 +3290,7 @@ def http_request(
 @mcp.tool()
 def http_download(url: str, destination: str, timeout_seconds: int = 60, max_bytes: int = 20_000_000) -> str:
     """Download a bounded HTTP response into the workspace and return its hash."""
+    authorize_tool("http_download")
     require_scope("network:fetch")
     require_scope("workspace:write")
     target = resolve_path(destination)
@@ -3082,6 +3316,7 @@ def http_upload(
     url: str, source_file: str, method: str = "PUT", headers: dict[str, str] | None = None, timeout_seconds: int = 60
 ) -> str:
     """Upload a workspace file as a raw HTTP request body."""
+    authorize_tool("http_upload")
     require_scope("network:fetch")
     source = resolve_path(source_file)
     request = urllib.request.Request(url, method=method.upper(), headers=headers or {}, data=source.read_bytes())
@@ -3112,6 +3347,7 @@ def http_upload(
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def dns_lookup(hostname: str) -> str:
     """Resolve a hostname to IP addresses."""
+    authorize_tool("dns_lookup")
     require_scope("network:fetch")
     results = sorted({entry[4][0] for entry in socket.getaddrinfo(hostname, None)})
     return _format_browser_result({"hostname": hostname, "addresses": results})
@@ -3120,6 +3356,7 @@ def dns_lookup(hostname: str) -> str:
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def tcp_check(hostname: str, port: int, timeout_seconds: int = 5) -> str:
     """Check TCP connectivity and report latency."""
+    authorize_tool("tcp_check")
     require_scope("network:fetch")
     started = time.monotonic()
     try:
@@ -3147,6 +3384,7 @@ def tcp_check(hostname: str, port: int, timeout_seconds: int = 5) -> str:
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def tls_certificate(hostname: str, port: int = 443, timeout_seconds: int = 10) -> str:
     """Inspect a TLS certificate and protocol for a host."""
+    authorize_tool("tls_certificate")
     require_scope("network:fetch")
     context = ssl.create_default_context()
     with socket.create_connection((hostname, port), timeout=min(max(timeout_seconds, 1), 30)) as raw:
@@ -3165,6 +3403,7 @@ def tls_certificate(hostname: str, port: int = 443, timeout_seconds: int = 10) -
 @mcp.tool()
 async def browser_session_upload(session_id: str, selector: str, files: list[str]) -> str:
     """Upload one or more workspace files through a file input in a persistent browser session."""
+    authorize_tool("browser_session_upload")
     require_scope("workspace:read")
     record = _get_browser_session(session_id)
     paths = [str(resolve_path(path)) for path in files]
@@ -3177,6 +3416,7 @@ async def browser_session_upload(session_id: str, selector: str, files: list[str
 @mcp.tool()
 async def browser_session_frame_evaluate(session_id: str, frame_selector: str, script: str) -> str:
     """Evaluate JavaScript inside a selected iframe in a persistent browser session."""
+    authorize_tool("browser_session_frame_evaluate")
     require_scope("browser:use")
     record = _get_browser_session(session_id)
     frame = record.page.frame_locator(frame_selector)
@@ -3189,6 +3429,7 @@ async def browser_session_route(
     session_id: str, url_pattern: str, action: str = "abort", fulfill_body: str | None = None, status: int = 200
 ) -> str:
     """Persistently intercept browser-session requests: abort them or fulfill them with a controlled text response."""
+    authorize_tool("browser_session_route")
     require_scope("browser:use")
     record = _get_browser_session(session_id)
     if action not in {"abort", "fulfill"}:
@@ -3207,6 +3448,7 @@ async def browser_session_route(
 @mcp.tool()
 async def browser_session_trace(session_id: str, destination: str) -> str:
     """Export a Playwright trace ZIP for the persistent session into the workspace, then start a new trace segment."""
+    authorize_tool("browser_session_trace")
     require_scope("workspace:write")
     record = _get_browser_session(session_id)
     target = resolve_path(destination)
@@ -3221,6 +3463,7 @@ async def browser_session_import_storage(
     session_id: str, local_storage: dict[str, str] | None = None, session_storage: dict[str, str] | None = None
 ) -> str:
     """Set localStorage and sessionStorage values in the current persistent browser-session page."""
+    authorize_tool("browser_session_import_storage")
     require_scope("browser:use")
     record = _get_browser_session(session_id)
     await record.page.evaluate(
@@ -3244,6 +3487,7 @@ def database_query(
     engine: str, query: str, database: str | None = None, secret_ref: str | None = None, timeout_seconds: int = 30
 ) -> str:
     """Run a SQLite query against a workspace database or a PostgreSQL query using a named secret connection URL. Use only for trusted development databases."""
+    authorize_tool("database_query")
     require_scope("database:use")
     timeout = min(max(timeout_seconds, 1), 120)
     if engine == "sqlite":
@@ -3276,6 +3520,7 @@ def database_query(
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def compose_status(cwd: str = ".") -> str:
     """Return Docker Compose service state for a project."""
+    authorize_tool("compose_status")
     require_scope("deploy:run")
     return shell("docker compose ps --all", cwd)
 
@@ -3283,6 +3528,7 @@ def compose_status(cwd: str = ".") -> str:
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def compose_logs(service: str | None = None, tail: int = 200, cwd: str = ".") -> str:
     """Return bounded recent Docker Compose logs."""
+    authorize_tool("compose_logs")
     require_scope("deploy:run")
     suffix = f" {shlex.quote(service)}" if service else ""
     return shell(f"docker compose logs --tail {min(max(tail, 1), 2000)} --no-color{suffix}", cwd)
@@ -3291,6 +3537,7 @@ def compose_logs(service: str | None = None, tail: int = 200, cwd: str = ".") ->
 @mcp.tool()
 def compose_restart(services: list[str] | None = None, cwd: str = ".") -> str:
     """Restart all or selected Docker Compose services."""
+    authorize_tool("compose_restart")
     require_scope("deploy:run")
     require_scope("workspace:write")
     suffix = " ".join(shlex.quote(service) for service in services or [])
@@ -3300,6 +3547,7 @@ def compose_restart(services: list[str] | None = None, cwd: str = ".") -> str:
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def wait_for_http_health(url: str, expected_status: int = 200, timeout_seconds: int = 60) -> str:
     """Poll an HTTP endpoint until it returns the expected status or times out."""
+    authorize_tool("wait_for_http_health")
     require_scope("deploy:run")
     deadline = time.monotonic() + min(max(timeout_seconds, 1), 300)
     last_status: int | None = None
@@ -3336,6 +3584,7 @@ def start_process_advanced(
     allow_stdin: bool = False,
 ) -> str:
     """Start an argv background process without shell parsing, with controlled environment, optional named secrets, and optional stdin forwarding."""
+    authorize_tool("start_process_advanced")
     require_scope("command:run")
     if not argv or not all(isinstance(part, str) and part for part in argv):
         raise ValueError("argv must contain one or more non-empty strings")
@@ -3379,6 +3628,7 @@ def start_process_advanced(
 @mcp.tool()
 def send_process_input(process_id: str, data: str, append_newline: bool = True) -> str:
     """Send text to a background process started with allow_stdin=true."""
+    authorize_tool("send_process_input")
     require_scope("command:run")
     record = session_state().processes.get(process_id)
     if record is None:
@@ -3397,6 +3647,7 @@ def send_process_input(process_id: str, data: str, append_newline: bool = True) 
 @mcp.tool()
 def signal_process(process_id: str, signal_name: str = "TERM") -> str:
     """Send a POSIX signal (TERM, INT, HUP, KILL, USR1, USR2) to a tracked process group."""
+    authorize_tool("signal_process")
     require_scope("command:run")
     record = session_state().processes.get(process_id)
     if record is None:
@@ -3415,6 +3666,7 @@ def signal_process(process_id: str, signal_name: str = "TERM") -> str:
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def port_owner(port: int) -> str:
     """Report listeners bound to a local TCP or UDP port."""
+    authorize_tool("port_owner")
     require_scope("command:run")
     if not 1 <= port <= 65535:
         raise ValueError("port must be between 1 and 65535")
@@ -3424,6 +3676,7 @@ def port_owner(port: int) -> str:
 @mcp.tool()
 async def browser_session_download(session_id: str, action: dict[str, Any], destination: str) -> str:
     """Perform a browser action that triggers a download and save the exact downloaded file in the workspace."""
+    authorize_tool("browser_session_download")
     require_scope("workspace:write")
     record = _get_browser_session(session_id)
     target = resolve_path(destination)
@@ -3447,6 +3700,7 @@ async def browser_session_download(session_id: str, action: dict[str, Any], dest
 @mcp.tool()
 async def browser_session_popup(session_id: str, action: dict[str, Any], timeout_seconds: int = 20) -> str:
     """Perform an action expected to open a popup and make that popup the active page of the persistent session."""
+    authorize_tool("browser_session_popup")
     require_scope("browser:use")
     record = _get_browser_session(session_id)
     timeout_ms = _bounded_timeout_ms(timeout_seconds)

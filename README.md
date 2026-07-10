@@ -77,6 +77,7 @@ The bootstrap service creates a `chatgpt` login user (or the username set in `KE
    - `network:fetch`
    - `secrets:use`
    - `database:use`
+   - `admin:install`
    - `deploy:run`
    - `github:write`
 
