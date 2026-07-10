@@ -2592,5 +2592,115 @@ def wait_for_http_health(url: str, expected_status: int = 200, timeout_seconds: 
         time.sleep(1)
     return _format_browser_result({"healthy": False, "url": url, "expected_status": expected_status, "last_status": last_status, "last_error": last_error})
 
+
+@mcp.tool()
+def start_process_advanced(
+    argv: list[str],
+    cwd: str = ".",
+    name: Optional[str] = None,
+    environment: Optional[dict[str, str]] = None,
+    secret_refs: Optional[list[str]] = None,
+    allow_stdin: bool = False,
+) -> str:
+    """Start an argv background process without shell parsing, with controlled environment, optional named secrets, and optional stdin forwarding."""
+    require_scope("command:run")
+    if not argv or not all(isinstance(part, str) and part for part in argv):
+        raise ValueError("argv must contain one or more non-empty strings")
+    state = session_state()
+    process_id = (name or str(uuid.uuid4())[:8]).strip() or str(uuid.uuid4())[:8]
+    if process_id in state.processes:
+        raise ValueError(f"Process id already exists: {process_id}")
+    working_dir = resolve_path(cwd)
+    process = subprocess.Popen(
+        argv,
+        cwd=working_dir,
+        env=_command_environment(environment, secret_refs),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.PIPE if allow_stdin else subprocess.DEVNULL,
+        bufsize=1,
+        start_new_session=True,
+    )
+    record = ProcessRecord(command=shlex.join(argv), cwd=working_dir, process=process, started_at=time.time())
+    with PROCESS_LOCK:
+        state.processes[process_id] = record
+    threading.Thread(target=_read_process_output, args=(process_id, record), daemon=True, name=f"process-output-{process_id}").start()
+    state.command_history.append(f"[{state.current_project_name}] {working_dir}$ {shlex.join(argv)}  # process={process_id}")
+    return _format_browser_result({"process_id": process_id, "pid": process.pid, "cwd": str(working_dir), "argv": argv, "stdin_enabled": allow_stdin, "secret_refs_used": secret_refs or []})
+
+
+@mcp.tool()
+def send_process_input(process_id: str, data: str, append_newline: bool = True) -> str:
+    """Send text to a background process started with allow_stdin=true."""
+    require_scope("command:run")
+    record = session_state().processes.get(process_id)
+    if record is None:
+        raise ValueError("Unknown process_id")
+    if record.process.stdin is None:
+        raise ValueError("Process was not started with allow_stdin=true")
+    if record.process.poll() is not None:
+        raise ValueError("Process has already exited")
+    record.process.stdin.write(data + ("\n" if append_newline else ""))
+    record.process.stdin.flush()
+    return _format_browser_result({"process_id": process_id, "characters_sent": len(data), "newline_appended": append_newline})
+
+
+@mcp.tool()
+def signal_process(process_id: str, signal_name: str = "TERM") -> str:
+    """Send a POSIX signal (TERM, INT, HUP, KILL, USR1, USR2) to a tracked process group."""
+    require_scope("command:run")
+    record = session_state().processes.get(process_id)
+    if record is None:
+        raise ValueError("Unknown process_id")
+    signals = {"TERM": 15, "INT": 2, "HUP": 1, "KILL": 9, "USR1": 10, "USR2": 12}
+    signal_number = signals.get(signal_name.upper())
+    if signal_number is None:
+        raise ValueError(f"Unsupported signal: {signal_name}")
+    if record.process.poll() is None:
+        os.killpg(record.process.pid, signal_number)
+    return _format_browser_result({"process_id": process_id, "signal": signal_name.upper(), "status": _process_status(record)})
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def port_owner(port: int) -> str:
+    """Report listeners bound to a local TCP or UDP port."""
+    require_scope("command:run")
+    if not 1 <= port <= 65535:
+        raise ValueError("port must be between 1 and 65535")
+    return shell(f"ss -lptun 'sport = :{port}' || true", cwd=".")
+
+
+@mcp.tool()
+async def browser_session_download(session_id: str, action: dict[str, Any], destination: str) -> str:
+    """Perform a browser action that triggers a download and save the exact downloaded file in the workspace."""
+    require_scope("workspace:write")
+    record = _get_browser_session(session_id)
+    target = resolve_path(destination)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    async with record.page.expect_download() as download_info:
+        await _run_browser_action(record.page, action, 1, _bounded_timeout_ms(20))
+    download = await download_info.value
+    await download.save_as(str(target))
+    data = target.read_bytes()
+    return _format_browser_result({"session_id": session_id, "path": str(target), "suggested_filename": download.suggested_filename, "size_bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+
+
+@mcp.tool()
+async def browser_session_popup(session_id: str, action: dict[str, Any], timeout_seconds: int = 20) -> str:
+    """Perform an action expected to open a popup and make that popup the active page of the persistent session."""
+    require_scope("browser:use")
+    record = _get_browser_session(session_id)
+    timeout_ms = _bounded_timeout_ms(timeout_seconds)
+    async with record.page.expect_popup(timeout=timeout_ms) as popup_info:
+        await _run_browser_action(record.page, action, 1, timeout_ms)
+    popup = await popup_info.value
+    await popup.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+    record.page = popup
+    _attach_session_events(session_id, popup, record)
+    summary = await _collect_page_summary(popup, include_text=True)
+    summary.update({"session_id": session_id, "popup": True})
+    return _format_browser_result(summary)
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")

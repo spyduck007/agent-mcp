@@ -236,6 +236,10 @@ By default, the server binds to `0.0.0.0:8080` and serves MCP traffic at `/mcp`.
 - `stop_process`
 - `forget_process`
 - `run_command_advanced`
+- `start_process_advanced`
+- `send_process_input`
+- `signal_process`
+- `port_owner`
 
 ### Git Tools
 
@@ -281,6 +285,8 @@ By default, the server binds to `0.0.0.0:8080` and serves MCP traffic at `/mcp`.
 - `browser_session_route`
 - `browser_session_trace`
 - `browser_session_import_storage`
+- `browser_session_download`
+- `browser_session_popup`
 
 ### Snapshot Tools
 
