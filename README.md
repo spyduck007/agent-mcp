@@ -240,6 +240,19 @@ Run the server locally:
 python -m app.server
 ```
 
+Run the same verification checks used by CI:
+
+```bash
+python -m compileall -q .
+python -m ruff check .
+python -m ruff format --check .
+python -m pyright
+python -m pytest -q
+docker compose --env-file .mcp-compose-validation.env config --quiet
+```
+
+Pytest enforces the current 30% coverage floor. `project_verify` reports each requested suite as `passed`, `failed`, or `not_configured`; explicitly requesting an unconfigured suite makes the overall verification fail instead of silently passing.
+
 By default, the server binds to `0.0.0.0:8080` and serves MCP traffic at `/mcp`.
 
 ## Tool Groups

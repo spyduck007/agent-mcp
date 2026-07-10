@@ -1,36 +1,41 @@
+import base64
+import difflib
+import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
+import socket
+import ssl
 import subprocess
 import threading
 import time
-import uuid
-import hashlib
-import base64
-import difflib
-import socket
-import ssl
-from datetime import datetime, timezone
-from urllib.parse import urlparse
-from collections.abc import Iterable
-from collections import deque
-from dataclasses import dataclass, field
-import urllib.request
 import urllib.error
+import urllib.request
+import uuid
+from collections import deque
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
+from urllib.parse import urlparse
 
-from mcp.server.fastmcp import FastMCP
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import AccessToken, TokenVerifier
 from mcp.server.auth.settings import AuthSettings
+from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
+from pydantic import AnyHttpUrl
 
 try:
     import jwt
 except ImportError:  # pragma: no cover - clearer startup error below
     jwt = None
+
+
+READ_ONLY_ANNOTATIONS = ToolAnnotations(readOnlyHint=True)
 
 
 AUTH_MODE = os.getenv("AUTH_MODE", "required").lower()
@@ -49,20 +54,22 @@ class OidcTokenVerifier(TokenVerifier):
     """Validate JWT access tokens issued by the configured OAuth/OIDC provider."""
 
     def __init__(self, issuer: str, audience: str, client_id: str, jwks_url: str) -> None:
-        if jwt is None:
+        jwt_module = jwt
+        if jwt_module is None:
             raise RuntimeError("PyJWT is required when AUTH_MODE=required")
+        self.jwt = jwt_module
         self.issuer = issuer
         self.audience = audience
         self.client_id = client_id
-        self.jwks = jwt.PyJWKClient(jwks_url, cache_keys=True)
+        self.jwks = jwt_module.PyJWKClient(jwks_url, cache_keys=True)
 
     async def verify_token(self, token: str) -> AccessToken | None:
         try:
             signing_key = self.jwks.get_signing_key_from_jwt(token).key
-            decode_options: dict[str, Any] = {"require": ["exp", "iss", "sub"]}
+            decode_options: Any = {"require": ["exp", "iss", "sub"]}
             if not self.audience:
                 decode_options["verify_aud"] = False
-            claims = jwt.decode(
+            claims = self.jwt.decode(
                 token,
                 signing_key,
                 algorithms=["RS256", "ES256", "PS256"],
@@ -98,16 +105,24 @@ def _auth_settings() -> tuple[AuthSettings | None, TokenVerifier | None]:
         return None, None
     if AUTH_MODE != "required":
         raise RuntimeError("AUTH_MODE must be 'required' or 'disabled'")
-    missing = [name for name, value in {
-        "OIDC_ISSUER": OIDC_ISSUER,
-        "OIDC_CLIENT_ID": OIDC_CLIENT_ID,
-        "OIDC_JWKS_URL": OIDC_JWKS_URL,
-        "PUBLIC_URL": PUBLIC_URL,
-    }.items() if not value]
+    missing = [
+        name
+        for name, value in {
+            "OIDC_ISSUER": OIDC_ISSUER,
+            "OIDC_CLIENT_ID": OIDC_CLIENT_ID,
+            "OIDC_JWKS_URL": OIDC_JWKS_URL,
+            "PUBLIC_URL": PUBLIC_URL,
+        }.items()
+        if not value
+    ]
     if missing:
         raise RuntimeError(f"Refusing to start without OAuth configuration: {', '.join(missing)}")
     return (
-        AuthSettings(issuer_url=OIDC_ISSUER, resource_server_url=PUBLIC_URL, required_scopes=[]),
+        AuthSettings(
+            issuer_url=AnyHttpUrl(OIDC_ISSUER),
+            resource_server_url=AnyHttpUrl(PUBLIC_URL),
+            required_scopes=[],
+        ),
         OidcTokenVerifier(OIDC_ISSUER, OIDC_AUDIENCE, OIDC_CLIENT_ID, OIDC_JWKS_URL),
     )
 
@@ -207,7 +222,18 @@ def _identity() -> tuple[str, set[str]]:
     token = get_access_token()
     if token is None:
         if AUTH_MODE == "disabled":
-            return "local-dev", {"workspace:read", "workspace:write", "command:run", "browser:use", "network:fetch", "admin:install", "secrets:use", "database:use", "deploy:run", "github:write"}
+            return "local-dev", {
+                "workspace:read",
+                "workspace:write",
+                "command:run",
+                "browser:use",
+                "network:fetch",
+                "admin:install",
+                "secrets:use",
+                "database:use",
+                "deploy:run",
+                "github:write",
+            }
         raise PermissionError("OAuth authentication is required")
     if not token.subject:
         raise PermissionError("OAuth token has no subject")
@@ -230,7 +256,9 @@ def session_state() -> UserSessionState:
         if not roots:
             raise PermissionError("No workspace has been assigned to this identity")
         root = roots[0]
-        state = UserSessionState(subject=subject, projects={"workspace": root}, current_project_name="workspace", current_project=root)
+        state = UserSessionState(
+            subject=subject, projects={"workspace": root}, current_project_name="workspace", current_project=root
+        )
         SESSIONS[subject] = state
         return state
 
@@ -263,7 +291,7 @@ def _audit(event: str, details: dict[str, Any]) -> None:
     """Write a bounded, credential-free audit record for high-level agent actions."""
     try:
         entry = {
-            "at": datetime.now(timezone.utc).isoformat(),
+            "at": datetime.now(UTC).isoformat(),
             "subject": session_state().subject,
             "project": session_state().current_project_name,
             "event": event,
@@ -323,7 +351,9 @@ def shell(command: str, cwd: str = ".", timeout_seconds: int = DEFAULT_TIMEOUT_S
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        output = (exc.stdout or "") + "\n" + (exc.stderr or "")
+        stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        output = stdout + "\n" + stderr
         return f"timed_out: true\nseconds: {timeout}\n\n{output[:MAX_OUTPUT]}"
 
     output = f"exit_code: {result.returncode}\n\nstdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
@@ -331,7 +361,7 @@ def shell(command: str, cwd: str = ".", timeout_seconds: int = DEFAULT_TIMEOUT_S
 
 
 @mcp.tool()
-def open_project(path: str, name: Optional[str] = None) -> str:
+def open_project(path: str, name: str | None = None) -> str:
     """Open a project directory and make it the active project."""
     target = resolve_path(path)
 
@@ -358,7 +388,7 @@ def switch_project(name: str) -> str:
     return f"Switched to project '{name}' at {state.current_project}"
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def list_projects() -> str:
     """List opened projects."""
     state = session_state()
@@ -366,8 +396,7 @@ def list_projects() -> str:
         return "No projects opened."
 
     return "\n".join(
-        f"{'*' if name == state.current_project_name else ' '} {name}: {path}"
-        for name, path in state.projects.items()
+        f"{'*' if name == state.current_project_name else ' '} {name}: {path}" for name, path in state.projects.items()
     )
 
 
@@ -390,7 +419,7 @@ def close_project(name: str) -> str:
     return f"Closed project: {name}"
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def pwd() -> str:
     """Return the active project directory."""
     state = session_state()
@@ -418,7 +447,7 @@ def append_file(file_path: str, contents: str) -> str:
     return f"Appended {len(contents)} characters to {target}"
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def read_file(file_path: str, start_line: int = 1, max_lines: int = 300) -> str:
     target = resolve_path(file_path)
 
@@ -429,20 +458,14 @@ def read_file(file_path: str, start_line: int = 1, max_lines: int = 300) -> str:
     lines = data.decode("utf-8", errors="replace").splitlines()
 
     start = max(start_line - 1, 0)
-    selected = lines[start:start + max_lines]
+    selected = lines[start : start + max_lines]
 
-    return "\n".join(
-        f"{line_no}: {line}"
-        for line_no, line in enumerate(selected, start=start + 1)
-    )
+    return "\n".join(f"{line_no}: {line}" for line_no, line in enumerate(selected, start=start + 1))
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def read_files(file_paths: list[str]) -> str:
-    return "\n\n".join(
-        f"--- {path} ---\n{read_file(path)}"
-        for path in file_paths
-    )
+    return "\n\n".join(f"--- {path} ---\n{read_file(path)}" for path in file_paths)
 
 
 @mcp.tool()
@@ -450,7 +473,7 @@ def replace_in_file(
     file_path: str,
     old_text: str,
     new_text: str,
-    expected_replacements: Optional[int] = None,
+    expected_replacements: int | None = None,
 ) -> str:
     require_scope("workspace:write")
     target = resolve_path(file_path)
@@ -473,7 +496,7 @@ def replace_lines(file_path: str, start_line: int, end_line: int, new_content: s
     target = resolve_path(file_path)
     lines = target.read_text(encoding="utf-8").splitlines()
 
-    before = lines[:start_line - 1]
+    before = lines[: start_line - 1]
     after = lines[end_line:]
     replacement = new_content.splitlines()
 
@@ -540,7 +563,7 @@ def create_directory(directory: str) -> str:
     return f"Created directory: {target}"
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def list_files(directory: str = ".", recursive: bool = True, max_entries: int = 800) -> str:
     root = resolve_path(directory)
     iterator = root.rglob("*") if recursive else root.iterdir()
@@ -561,7 +584,7 @@ def list_files(directory: str = ".", recursive: bool = True, max_entries: int = 
     return "\n".join(entries)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def tree(directory: str = ".", depth: int = 3, max_entries: int = 400) -> str:
     root = resolve_path(directory)
     output = [f"{root}/"]
@@ -592,7 +615,7 @@ def tree(directory: str = ".", depth: int = 3, max_entries: int = 400) -> str:
     return "\n".join(output)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def find_file(pattern: str, directory: str = ".", max_results: int = 200) -> str:
     root = resolve_path(directory)
     results = []
@@ -606,7 +629,7 @@ def find_file(pattern: str, directory: str = ".", max_results: int = 200) -> str
     return "\n".join(results)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def search_files(query: str, directory: str = ".", max_results: int = 200) -> str:
     root = resolve_path(directory)
     results = []
@@ -632,7 +655,7 @@ def search_files(query: str, directory: str = ".", max_results: int = 200) -> st
     return "\n".join(results)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def regex_search(pattern: str, directory: str = ".", max_results: int = 200) -> str:
     root = resolve_path(directory)
     rx = re.compile(pattern)
@@ -659,23 +682,27 @@ def regex_search(pattern: str, directory: str = ".", max_results: int = 200) -> 
     return "\n".join(results)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def find_symbol(name: str, directory: str = ".", max_results: int = 100) -> str:
-    pattern = rf"^\s*(def|class|function|const|let|var|async function|export function|export class)\s+{re.escape(name)}\b"
+    pattern = (
+        rf"^\s*(def|class|function|const|let|var|async function|export function|export class)\s+{re.escape(name)}\b"
+    )
     return regex_search(pattern, directory, max_results)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def stat_path(path: str) -> str:
     target = resolve_path(path)
     stat = target.stat()
 
-    return "\n".join([
-        f"path: {target}",
-        f"type: {'directory' if target.is_dir() else 'file'}",
-        f"size_bytes: {stat.st_size}",
-        f"modified_time_unix: {stat.st_mtime}",
-    ])
+    return "\n".join(
+        [
+            f"path: {target}",
+            f"type: {'directory' if target.is_dir() else 'file'}",
+            f"size_bytes: {stat.st_size}",
+            f"modified_time_unix: {stat.st_mtime}",
+        ]
+    )
 
 
 @mcp.tool()
@@ -714,7 +741,7 @@ def _read_process_output(process_id: str, record: ProcessRecord) -> None:
 
 
 @mcp.tool()
-def start_process(command: str, cwd: str = ".", name: Optional[str] = None) -> str:
+def start_process(command: str, cwd: str = ".", name: str | None = None) -> str:
     """Start a long-running process and capture output in the background without blocking."""
     working_dir = resolve_path(cwd)
     process_id = (name or str(uuid.uuid4())[:8]).strip()
@@ -762,13 +789,15 @@ def start_process(command: str, cwd: str = ".", name: Optional[str] = None) -> s
     )
     reader.start()
 
-    return "\n".join([
-        f"process_id: {process_id}",
-        f"pid: {process.pid}",
-        f"status: {_process_status(record)}",
-        f"cwd: {working_dir}",
-        f"command: {command}",
-    ])
+    return "\n".join(
+        [
+            f"process_id: {process_id}",
+            f"pid: {process.pid}",
+            f"status: {_process_status(record)}",
+            f"cwd: {working_dir}",
+            f"command: {command}",
+        ]
+    )
 
 
 @mcp.tool()
@@ -781,22 +810,24 @@ def list_processes() -> str:
 
     for process_id, record in items:
         rows.append(
-            "\n".join([
-                f"process_id: {process_id}",
-                f"pid: {record.process.pid}",
-                f"status: {_process_status(record)}",
-                f"cwd: {record.cwd}",
-                f"started_at_unix: {record.started_at}",
-                f"total_output_lines: {record.total_lines}",
-                f"command: {record.command}",
-            ])
+            "\n".join(
+                [
+                    f"process_id: {process_id}",
+                    f"pid: {record.process.pid}",
+                    f"status: {_process_status(record)}",
+                    f"cwd: {record.cwd}",
+                    f"started_at_unix: {record.started_at}",
+                    f"total_output_lines: {record.total_lines}",
+                    f"command: {record.command}",
+                ]
+            )
         )
 
     return "\n\n".join(rows) if rows else "No tracked processes."
 
 
 @mcp.tool()
-def get_process_output(process_id: str, max_lines: int = 300, since_line: Optional[int] = None) -> str:
+def get_process_output(process_id: str, max_lines: int = 300, since_line: int | None = None) -> str:
     """Return captured process output without blocking. Use since_line for incremental reads."""
     with PROCESS_LOCK:
         record = session_state().processes.get(process_id)
@@ -814,32 +845,34 @@ def get_process_output(process_id: str, max_lines: int = 300, since_line: Option
         start_line = max(total_lines - len(selected) + 1, first_buffered_line)
     else:
         start_index = max(since_line - first_buffered_line, 0)
-        selected = buffered_lines[start_index:start_index + max_lines]
+        selected = buffered_lines[start_index : start_index + max_lines]
         start_line = max(since_line, first_buffered_line)
 
-    header = "\n".join([
-        f"process_id: {process_id}",
-        f"pid: {record.process.pid}",
-        f"status: {_process_status(record)}",
-        f"exit_code: {record.process.poll()}",
-        f"total_output_lines: {total_lines}",
-        f"first_buffered_line: {first_buffered_line}",
-        f"returned_start_line: {start_line if selected else ''}",
-        f"next_since_line: {start_line + len(selected) if selected else total_lines + 1}",
-    ])
-
-    numbered = "\n".join(
-        f"{line_no}: {line}"
-        for line_no, line in enumerate(selected, start=start_line)
+    header = "\n".join(
+        [
+            f"process_id: {process_id}",
+            f"pid: {record.process.pid}",
+            f"status: {_process_status(record)}",
+            f"exit_code: {record.process.poll()}",
+            f"total_output_lines: {total_lines}",
+            f"first_buffered_line: {first_buffered_line}",
+            f"returned_start_line: {start_line if selected else ''}",
+            f"next_since_line: {start_line + len(selected) if selected else total_lines + 1}",
+        ]
     )
+
+    numbered = "\n".join(f"{line_no}: {line}" for line_no, line in enumerate(selected, start=start_line))
 
     return f"{header}\n\n{numbered}"[:MAX_OUTPUT]
 
 
 @mcp.tool()
-def wait_for_process_output(process_id: str, text: str, timeout_seconds: int = 30, since_line: Optional[int] = None) -> str:
+def wait_for_process_output(
+    process_id: str, text: str, timeout_seconds: int = 30, since_line: int | None = None
+) -> str:
     """Wait until text appears in background process output, without blocking forever."""
     deadline = time.time() + min(max(timeout_seconds, 1), 300)
+    record: ProcessRecord | None = None
 
     while time.time() < deadline:
         with PROCESS_LOCK:
@@ -856,26 +889,33 @@ def wait_for_process_output(process_id: str, text: str, timeout_seconds: int = 3
         for offset, line in enumerate(buffered_lines[start_index:], start=start_index):
             line_no = first_buffered_line + offset
             if text in line:
-                return "\n".join([
-                    "matched: true",
-                    f"process_id: {process_id}",
-                    f"line: {line_no}",
-                    f"next_since_line: {line_no + 1}",
-                    f"text: {line}",
-                ])
+                return "\n".join(
+                    [
+                        "matched: true",
+                        f"process_id: {process_id}",
+                        f"line: {line_no}",
+                        f"next_since_line: {line_no + 1}",
+                        f"text: {line}",
+                    ]
+                )
 
         if record.process.poll() is not None and record.reader_done:
             break
 
         time.sleep(0.2)
 
-    return "\n".join([
-        "matched: false",
-        f"process_id: {process_id}",
-        f"status: {_process_status(record)}",
-        f"total_output_lines: {record.total_lines}",
-        f"next_since_line: {record.total_lines + 1}",
-    ])
+    if record is None:
+        raise ValueError("Unknown process_id")
+
+    return "\n".join(
+        [
+            "matched: false",
+            f"process_id: {process_id}",
+            f"status: {_process_status(record)}",
+            f"total_output_lines: {record.total_lines}",
+            f"next_since_line: {record.total_lines + 1}",
+        ]
+    )
 
 
 @mcp.tool()
@@ -990,7 +1030,6 @@ def fetch_url(url: str, timeout_seconds: int = 10) -> str:
         return f"status: {exc.code}\n\n{body}"
 
 
-
 def _load_playwright():
     require_scope("browser:use")
     try:
@@ -1010,7 +1049,6 @@ def _normalize_url(url: str) -> str:
     if url.startswith(("http://", "https://", "file://")):
         return url
     return f"http://{url}"
-
 
 
 async def _collect_page_summary(page, include_text: bool = True, text_limit: int = 8000) -> dict[str, Any]:
@@ -1034,7 +1072,9 @@ async def _collect_page_summary(page, include_text: bool = True, text_limit: int
         summary["links_error"] = str(exc)
 
     try:
-        summary["buttons"] = await page.locator("button, [role=button], input[type=button], input[type=submit]").evaluate_all(
+        summary["buttons"] = await page.locator(
+            "button, [role=button], input[type=button], input[type=submit]"
+        ).evaluate_all(
             "els => els.slice(0, 80).map(e => ({text: (e.innerText || e.value || e.getAttribute('aria-label') || '').trim(), type: e.getAttribute('type') || '', disabled: !!e.disabled}))"
         )
     except Exception as exc:
@@ -1068,9 +1108,6 @@ async def _new_browser_page(playwright, width: int = 1280, height: int = 720):
     return browser, context, page
 
 
-
-
-
 def _safe_int(value: Any, default: int, minimum: int = 1, maximum: int = 100_000) -> int:
     try:
         parsed = int(value)
@@ -1083,18 +1120,62 @@ def _bounded_timeout_ms(timeout_seconds: int) -> int:
     return min(max(timeout_seconds, 1), 120) * 1000
 
 
-def _append_browser_events(page, console_messages: list[dict[str, Any]], page_errors: list[str], failed_requests: list[dict[str, Any]], responses: list[dict[str, Any]]) -> None:
-    page.on("console", lambda msg: console_messages.append({"type": msg.type, "text": msg.text, "location": msg.location}) if msg.type in {"error", "warning"} else None)
+def _append_browser_events(
+    page,
+    console_messages: list[dict[str, Any]],
+    page_errors: list[str],
+    failed_requests: list[dict[str, Any]],
+    responses: list[dict[str, Any]],
+) -> None:
+    page.on(
+        "console",
+        lambda msg: (
+            console_messages.append({"type": msg.type, "text": msg.text, "location": msg.location})
+            if msg.type in {"error", "warning"}
+            else None
+        ),
+    )
     page.on("pageerror", lambda exc: page_errors.append(str(exc)))
-    page.on("requestfailed", lambda req: failed_requests.append({"url": req.url, "method": req.method, "failure": str(req.failure) if req.failure else ""}))
-    page.on("response", lambda resp: responses.append({"url": resp.url, "status": resp.status, "status_text": resp.status_text}) if resp.status >= 400 else None)
+    page.on(
+        "requestfailed",
+        lambda req: failed_requests.append(
+            {"url": req.url, "method": req.method, "failure": str(req.failure) if req.failure else ""}
+        ),
+    )
+    page.on(
+        "response",
+        lambda resp: (
+            responses.append({"url": resp.url, "status": resp.status, "status_text": resp.status_text})
+            if resp.status >= 400
+            else None
+        ),
+    )
 
 
 def _attach_session_events(session_id: str, page, record: BrowserSessionRecord) -> None:
-    page.on("console", lambda msg: record.console_messages.append({"type": msg.type, "text": msg.text, "location": msg.location}) if msg.type in {"error", "warning"} else None)
+    page.on(
+        "console",
+        lambda msg: (
+            record.console_messages.append({"type": msg.type, "text": msg.text, "location": msg.location})
+            if msg.type in {"error", "warning"}
+            else None
+        ),
+    )
     page.on("pageerror", lambda exc: record.page_errors.append(str(exc)))
-    page.on("requestfailed", lambda req: record.failed_requests.append({"url": req.url, "method": req.method, "failure": str(req.failure) if req.failure else ""}))
-    page.on("response", lambda resp: record.responses.append({"url": resp.url, "status": resp.status, "status_text": resp.status_text}) if resp.status >= 400 else None)
+    page.on(
+        "requestfailed",
+        lambda req: record.failed_requests.append(
+            {"url": req.url, "method": req.method, "failure": str(req.failure) if req.failure else ""}
+        ),
+    )
+    page.on(
+        "response",
+        lambda resp: (
+            record.responses.append({"url": resp.url, "status": resp.status, "status_text": resp.status_text})
+            if resp.status >= 400
+            else None
+        ),
+    )
 
 
 async def _locator_from_action(page, action: dict[str, Any]):
@@ -1134,7 +1215,9 @@ async def _locator_from_action(page, action: dict[str, Any]):
     if title is not None:
         return page.get_by_title(str(title), exact=bool(action.get("exact", False)))
 
-    raise ValueError("Action needs one locator field: selector, role/name, text, label, placeholder, test_id, alt_text, or title")
+    raise ValueError(
+        "Action needs one locator field: selector, role/name, text, label, placeholder, test_id, alt_text, or title"
+    )
 
 
 async def _run_browser_action(page, action: dict[str, Any], index: int, timeout_ms: int) -> dict[str, Any]:
@@ -1145,7 +1228,9 @@ async def _run_browser_action(page, action: dict[str, Any], index: int, timeout_
     if kind in {"click", "dblclick", "fill", "type", "press", "hover", "check", "uncheck", "select", "focus", "blur"}:
         locator = await _locator_from_action(page, action)
         if kind == "click":
-            await locator.click(button=str(action.get("button", "left")), click_count=_safe_int(action.get("click_count", 1), 1, 1, 10))
+            await locator.click(
+                button=str(action.get("button", "left")), click_count=_safe_int(action.get("click_count", 1), 1, 1, 10)
+            )
         elif kind == "dblclick":
             await locator.dblclick()
         elif kind == "fill":
@@ -1167,7 +1252,9 @@ async def _run_browser_action(page, action: dict[str, Any], index: int, timeout_
         elif kind == "blur":
             await locator.blur()
     elif kind == "wait_for_selector":
-        await page.wait_for_selector(str(action.get("selector")), timeout=timeout_ms, state=str(action.get("state", "visible")))
+        await page.wait_for_selector(
+            str(action.get("selector")), timeout=timeout_ms, state=str(action.get("state", "visible"))
+        )
     elif kind == "wait_for_text":
         locator = page.get_by_text(str(action.get("text", "")), exact=bool(action.get("exact", False)))
         await locator.wait_for(timeout=timeout_ms, state=str(action.get("state", "visible")))
@@ -1176,7 +1263,9 @@ async def _run_browser_action(page, action: dict[str, Any], index: int, timeout_
     elif kind == "wait":
         await page.wait_for_timeout(_safe_int(action.get("ms", 1000), 1000, 1, timeout_ms))
     elif kind == "goto":
-        await page.goto(_normalize_url(str(action.get("url"))), wait_until=str(action.get("wait_until", "load")), timeout=timeout_ms)
+        await page.goto(
+            _normalize_url(str(action.get("url"))), wait_until=str(action.get("wait_until", "load")), timeout=timeout_ms
+        )
     elif kind == "reload":
         await page.reload(wait_until=str(action.get("wait_until", "load")), timeout=timeout_ms)
     elif kind == "assert_text":
@@ -1234,7 +1323,9 @@ async def _run_browser_actions(page, actions: list[dict[str, Any]], timeout_ms: 
     return action_results
 
 
-async def _evaluate_dom_snapshot(page, selector: str, element_limit: int, text_limit: int, include_attributes: bool) -> dict[str, Any]:
+async def _evaluate_dom_snapshot(
+    page, selector: str, element_limit: int, text_limit: int, include_attributes: bool
+) -> dict[str, Any]:
     return await page.evaluate(
         """
         ({selector, elementLimit, textLimit, includeAttributes}) => {
@@ -1513,22 +1604,37 @@ async def browser_check_errors(
 
     async with async_playwright() as p:
         browser, context, page = await _new_browser_page(p, width, height)
-        page.on("console", lambda msg: console_messages.append({"type": msg.type, "text": msg.text}) if msg.type in {"error", "warning"} else None)
+        page.on(
+            "console",
+            lambda msg: (
+                console_messages.append({"type": msg.type, "text": msg.text})
+                if msg.type in {"error", "warning"}
+                else None
+            ),
+        )
         page.on("pageerror", lambda exc: page_errors.append(str(exc)))
-        page.on("requestfailed", lambda req: failed_requests.append({"url": req.url, "failure": str(req.failure) if req.failure else ""}))
-        page.on("response", lambda resp: bad_responses.append({"url": resp.url, "status": resp.status}) if resp.status >= 400 else None)
+        page.on(
+            "requestfailed",
+            lambda req: failed_requests.append({"url": req.url, "failure": str(req.failure) if req.failure else ""}),
+        )
+        page.on(
+            "response",
+            lambda resp: bad_responses.append({"url": resp.url, "status": resp.status}) if resp.status >= 400 else None,
+        )
 
         try:
             await page.goto(target_url, wait_until=wait_until, timeout=timeout_ms)
             await page.wait_for_timeout(1000)
             result = await _collect_page_summary(page, include_text=False)
-            result.update({
-                "console_messages": console_messages[:100],
-                "page_errors": page_errors[:100],
-                "failed_requests": failed_requests[:100],
-                "bad_responses": bad_responses[:100],
-                "ok": not console_messages and not page_errors and not failed_requests and not bad_responses,
-            })
+            result.update(
+                {
+                    "console_messages": console_messages[:100],
+                    "page_errors": page_errors[:100],
+                    "failed_requests": failed_requests[:100],
+                    "bad_responses": bad_responses[:100],
+                    "ok": not console_messages and not page_errors and not failed_requests and not bad_responses,
+                }
+            )
             return _format_browser_result(result)
         finally:
             await context.close()
@@ -1563,14 +1669,16 @@ async def browser_interact(
             await page.goto(target_url, wait_until=wait_until, timeout=timeout_ms)
             action_results = await _run_browser_actions(page, actions, timeout_ms)
             result = await _collect_page_summary(page, include_text=True, text_limit=text_limit)
-            result.update({
-                "actions": action_results,
-                "console_messages": console_messages[:100],
-                "page_errors": page_errors[:100],
-                "failed_requests": failed_requests[:100],
-                "bad_responses": bad_responses[:100],
-                "ok": not console_messages and not page_errors and not failed_requests and not bad_responses,
-            })
+            result.update(
+                {
+                    "actions": action_results,
+                    "console_messages": console_messages[:100],
+                    "page_errors": page_errors[:100],
+                    "failed_requests": failed_requests[:100],
+                    "bad_responses": bad_responses[:100],
+                    "ok": not console_messages and not page_errors and not failed_requests and not bad_responses,
+                }
+            )
             return _format_browser_result(result)
         finally:
             await context.close()
@@ -1596,11 +1704,13 @@ async def browser_evaluate(
         try:
             await page.goto(target_url, wait_until=wait_until, timeout=timeout_ms)
             value = await page.evaluate(script)
-            return _format_browser_result({
-                "url": page.url,
-                "title": await page.title(),
-                "result": value,
-            })
+            return _format_browser_result(
+                {
+                    "url": page.url,
+                    "title": await page.title(),
+                    "result": value,
+                }
+            )
         finally:
             await context.close()
             await browser.close()
@@ -1627,7 +1737,13 @@ async def browser_dom_snapshot(
         browser, context, page = await _new_browser_page(p, width, height)
         try:
             await page.goto(target_url, wait_until=wait_until, timeout=timeout_ms)
-            data = await _evaluate_dom_snapshot(page, selector, _safe_int(element_limit, 250, 1, 2000), _safe_int(text_limit, 500, 1, 5000), include_attributes)
+            data = await _evaluate_dom_snapshot(
+                page,
+                selector,
+                _safe_int(element_limit, 250, 1, 2000),
+                _safe_int(text_limit, 500, 1, 5000),
+                include_attributes,
+            )
             return _format_browser_result(data)
         finally:
             await context.close()
@@ -1653,7 +1769,11 @@ async def browser_accessibility_snapshot(
         browser, context, page = await _new_browser_page(p, width, height)
         try:
             await page.goto(target_url, wait_until=wait_until, timeout=timeout_ms)
-            return _format_browser_result(await _evaluate_accessibility_snapshot(page, _safe_int(element_limit, 250, 1, 2000), _safe_int(text_limit, 500, 1, 5000)))
+            return _format_browser_result(
+                await _evaluate_accessibility_snapshot(
+                    page, _safe_int(element_limit, 250, 1, 2000), _safe_int(text_limit, 500, 1, 5000)
+                )
+            )
         finally:
             await context.close()
             await browser.close()
@@ -1678,7 +1798,11 @@ async def browser_form_snapshot(
         browser, context, page = await _new_browser_page(p, width, height)
         try:
             await page.goto(target_url, wait_until=wait_until, timeout=timeout_ms)
-            return _format_browser_result(await _evaluate_form_snapshot(page, _safe_int(element_limit, 200, 1, 2000), _safe_int(text_limit, 500, 1, 5000)))
+            return _format_browser_result(
+                await _evaluate_form_snapshot(
+                    page, _safe_int(element_limit, 200, 1, 2000), _safe_int(text_limit, 500, 1, 5000)
+                )
+            )
         finally:
             await context.close()
             await browser.close()
@@ -1688,7 +1812,7 @@ async def browser_form_snapshot(
 async def browser_assert(
     url: str,
     assertions: list[dict[str, Any]],
-    actions: Optional[list[dict[str, Any]]] = None,
+    actions: list[dict[str, Any]] | None = None,
     width: int = 1280,
     height: int = 720,
     wait_until: str = "load",
@@ -1711,17 +1835,19 @@ async def browser_assert(
             await page.goto(target_url, wait_until=wait_until, timeout=timeout_ms)
             action_results = await _run_browser_actions(page, actions or [], timeout_ms)
             assertion_results = await _run_browser_actions(page, assertions, timeout_ms)
-            return _format_browser_result({
-                "url": page.url,
-                "title": await page.title(),
-                "actions": action_results,
-                "assertions": assertion_results,
-                "console_messages": console_messages[:100],
-                "page_errors": page_errors[:100],
-                "failed_requests": failed_requests[:100],
-                "bad_responses": bad_responses[:100],
-                "ok": not console_messages and not page_errors and not failed_requests and not bad_responses,
-            })
+            return _format_browser_result(
+                {
+                    "url": page.url,
+                    "title": await page.title(),
+                    "actions": action_results,
+                    "assertions": assertion_results,
+                    "console_messages": console_messages[:100],
+                    "page_errors": page_errors[:100],
+                    "failed_requests": failed_requests[:100],
+                    "bad_responses": bad_responses[:100],
+                    "ok": not console_messages and not page_errors and not failed_requests and not bad_responses,
+                }
+            )
         finally:
             await context.close()
             await browser.close()
@@ -1730,7 +1856,7 @@ async def browser_assert(
 @mcp.tool()
 async def browser_network_trace(
     url: str,
-    actions: Optional[list[dict[str, Any]]] = None,
+    actions: list[dict[str, Any]] | None = None,
     width: int = 1280,
     height: int = 720,
     wait_until: str = "load",
@@ -1751,10 +1877,40 @@ async def browser_network_trace(
     async with async_playwright() as p:
         browser, context, page = await _new_browser_page(p, width, height)
         page.set_default_timeout(timeout_ms)
-        page.on("request", lambda req: requests.append({"url": req.url, "method": req.method, "resource_type": req.resource_type}) if len(requests) < event_limit else None)
-        page.on("response", lambda resp: responses.append({"url": resp.url, "status": resp.status, "status_text": resp.status_text}) if len(responses) < event_limit else None)
-        page.on("requestfailed", lambda req: failed_requests.append({"url": req.url, "method": req.method, "failure": str(req.failure) if req.failure else ""}) if len(failed_requests) < event_limit else None)
-        page.on("console", lambda msg: console_messages.append({"type": msg.type, "text": msg.text, "location": msg.location}) if len(console_messages) < event_limit else None)
+        page.on(
+            "request",
+            lambda req: (
+                requests.append({"url": req.url, "method": req.method, "resource_type": req.resource_type})
+                if len(requests) < event_limit
+                else None
+            ),
+        )
+        page.on(
+            "response",
+            lambda resp: (
+                responses.append({"url": resp.url, "status": resp.status, "status_text": resp.status_text})
+                if len(responses) < event_limit
+                else None
+            ),
+        )
+        page.on(
+            "requestfailed",
+            lambda req: (
+                failed_requests.append(
+                    {"url": req.url, "method": req.method, "failure": str(req.failure) if req.failure else ""}
+                )
+                if len(failed_requests) < event_limit
+                else None
+            ),
+        )
+        page.on(
+            "console",
+            lambda msg: (
+                console_messages.append({"type": msg.type, "text": msg.text, "location": msg.location})
+                if len(console_messages) < event_limit
+                else None
+            ),
+        )
         page.on("pageerror", lambda exc: page_errors.append(str(exc)) if len(page_errors) < event_limit else None)
         try:
             await page.goto(target_url, wait_until=wait_until, timeout=timeout_ms)
@@ -1763,18 +1919,23 @@ async def browser_network_trace(
                 await page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 5000))
             except Exception:
                 pass
-            return _format_browser_result({
-                "url": page.url,
-                "title": await page.title(),
-                "actions": action_results,
-                "requests": requests[:event_limit],
-                "responses": responses[:event_limit],
-                "failed_requests": failed_requests[:event_limit],
-                "console_messages": console_messages[:event_limit],
-                "page_errors": page_errors[:event_limit],
-                "bad_responses": [r for r in responses if r.get("status", 0) >= 400][:event_limit],
-                "ok": not failed_requests and not page_errors and not [r for r in responses if r.get("status", 0) >= 400] and not [m for m in console_messages if m.get("type") in {"error", "warning"}],
-            })
+            return _format_browser_result(
+                {
+                    "url": page.url,
+                    "title": await page.title(),
+                    "actions": action_results,
+                    "requests": requests[:event_limit],
+                    "responses": responses[:event_limit],
+                    "failed_requests": failed_requests[:event_limit],
+                    "console_messages": console_messages[:event_limit],
+                    "page_errors": page_errors[:event_limit],
+                    "bad_responses": [r for r in responses if r.get("status", 0) >= 400][:event_limit],
+                    "ok": not failed_requests
+                    and not page_errors
+                    and not [r for r in responses if r.get("status", 0) >= 400]
+                    and not [m for m in console_messages if m.get("type") in {"error", "warning"}],
+                }
+            )
         finally:
             await context.close()
             await browser.close()
@@ -1816,7 +1977,7 @@ async def browser_storage_state(
 @mcp.tool()
 async def browser_session_open(
     url: str,
-    session_id: Optional[str] = None,
+    session_id: str | None = None,
     width: int = 1280,
     height: int = 720,
     wait_until: str = "load",
@@ -1838,7 +1999,9 @@ async def browser_session_open(
     browser, context, page = await _new_browser_page(playwright, width, height)
     await context.tracing.start(screenshots=False, snapshots=True, sources=True)
     page.set_default_timeout(timeout_ms)
-    record = BrowserSessionRecord(playwright=playwright, browser=browser, context=context, page=page, created_at=time.time())
+    record = BrowserSessionRecord(
+        playwright=playwright, browser=browser, context=context, page=page, created_at=time.time()
+    )
     _attach_session_events(session_id, page, record)
     state.browser_sessions[session_id] = record
     try:
@@ -1860,15 +2023,17 @@ def browser_session_list() -> str:
     require_scope("browser:use")
     sessions = []
     for session_id, record in session_state().browser_sessions.items():
-        sessions.append({
-            "session_id": session_id,
-            "url": record.page.url,
-            "created_at_unix": record.created_at,
-            "console_messages": len(record.console_messages),
-            "page_errors": len(record.page_errors),
-            "failed_requests": len(record.failed_requests),
-            "bad_responses": len(record.responses),
-        })
+        sessions.append(
+            {
+                "session_id": session_id,
+                "url": record.page.url,
+                "created_at_unix": record.created_at,
+                "console_messages": len(record.console_messages),
+                "page_errors": len(record.page_errors),
+                "failed_requests": len(record.failed_requests),
+                "bad_responses": len(record.responses),
+            }
+        )
     return _format_browser_result({"sessions": sessions})
 
 
@@ -1905,14 +2070,16 @@ async def browser_session_interact(
     record.page.set_default_timeout(timeout_ms)
     action_results = await _run_browser_actions(record.page, actions, timeout_ms)
     result = await _collect_page_summary(record.page, include_text=True, text_limit=text_limit)
-    result.update({
-        "session_id": session_id,
-        "actions": action_results,
-        "console_messages": list(record.console_messages)[-100:],
-        "page_errors": list(record.page_errors)[-100:],
-        "failed_requests": list(record.failed_requests)[-100:],
-        "bad_responses": list(record.responses)[-100:],
-    })
+    result.update(
+        {
+            "session_id": session_id,
+            "actions": action_results,
+            "console_messages": list(record.console_messages)[-100:],
+            "page_errors": list(record.page_errors)[-100:],
+            "failed_requests": list(record.failed_requests)[-100:],
+            "bad_responses": list(record.responses)[-100:],
+        }
+    )
     return _format_browser_result(result)
 
 
@@ -1921,7 +2088,9 @@ async def browser_session_evaluate(session_id: str, script: str) -> str:
     """Evaluate JavaScript in an existing persistent browser session."""
     record = _get_browser_session(session_id)
     value = await record.page.evaluate(script)
-    return _format_browser_result({"session_id": session_id, "url": record.page.url, "title": await record.page.title(), "result": value})
+    return _format_browser_result(
+        {"session_id": session_id, "url": record.page.url, "title": await record.page.title(), "result": value}
+    )
 
 
 @mcp.tool()
@@ -1934,7 +2103,13 @@ async def browser_session_dom_snapshot(
 ) -> str:
     """Return a structured DOM snapshot for the current page in a persistent browser session."""
     record = _get_browser_session(session_id)
-    data = await _evaluate_dom_snapshot(record.page, selector, _safe_int(element_limit, 250, 1, 2000), _safe_int(text_limit, 500, 1, 5000), include_attributes)
+    data = await _evaluate_dom_snapshot(
+        record.page,
+        selector,
+        _safe_int(element_limit, 250, 1, 2000),
+        _safe_int(text_limit, 500, 1, 5000),
+        include_attributes,
+    )
     data["session_id"] = session_id
     return _format_browser_result(data)
 
@@ -1947,7 +2122,9 @@ async def browser_session_accessibility_snapshot(
 ) -> str:
     """Return an accessibility-oriented snapshot for the current page in a persistent browser session."""
     record = _get_browser_session(session_id)
-    data = await _evaluate_accessibility_snapshot(record.page, _safe_int(element_limit, 250, 1, 2000), _safe_int(text_limit, 500, 1, 5000))
+    data = await _evaluate_accessibility_snapshot(
+        record.page, _safe_int(element_limit, 250, 1, 2000), _safe_int(text_limit, 500, 1, 5000)
+    )
     data["session_id"] = session_id
     return _format_browser_result(data)
 
@@ -1958,19 +2135,24 @@ def browser_session_logs(session_id: str, max_entries: int = 100) -> str:
     require_scope("browser:use")
     record = _get_browser_session(session_id)
     limit = _safe_int(max_entries, 100, 1, BROWSER_LOG_LIMIT)
-    return _format_browser_result({
-        "session_id": session_id,
-        "url": record.page.url,
-        "console_messages": list(record.console_messages)[-limit:],
-        "page_errors": list(record.page_errors)[-limit:],
-        "failed_requests": list(record.failed_requests)[-limit:],
-        "bad_responses": list(record.responses)[-limit:],
-        "ok": not record.console_messages and not record.page_errors and not record.failed_requests and not record.responses,
-    })
+    return _format_browser_result(
+        {
+            "session_id": session_id,
+            "url": record.page.url,
+            "console_messages": list(record.console_messages)[-limit:],
+            "page_errors": list(record.page_errors)[-limit:],
+            "failed_requests": list(record.failed_requests)[-limit:],
+            "bad_responses": list(record.responses)[-limit:],
+            "ok": not record.console_messages
+            and not record.page_errors
+            and not record.failed_requests
+            and not record.responses,
+        }
+    )
 
 
 @mcp.tool()
-def create_snapshot(name: Optional[str] = None) -> str:
+def create_snapshot(name: str | None = None) -> str:
     require_scope("workspace:write")
     snapshots = user_snapshot_root()
 
@@ -2025,9 +2207,21 @@ def _run_argv(argv: list[str], cwd: Path, timeout_seconds: int = 300) -> dict[st
     """Run a fixed argv command and return bounded structured output."""
     try:
         result = subprocess.run(argv, cwd=cwd, text=True, capture_output=True, timeout=timeout_seconds)
-        return {"argv": argv, "exit_code": result.returncode, "timed_out": False, "stdout": result.stdout[:MAX_OUTPUT], "stderr": result.stderr[:MAX_OUTPUT]}
+        return {
+            "argv": argv,
+            "exit_code": result.returncode,
+            "timed_out": False,
+            "stdout": result.stdout[:MAX_OUTPUT],
+            "stderr": result.stderr[:MAX_OUTPUT],
+        }
     except subprocess.TimeoutExpired as exc:
-        return {"argv": argv, "exit_code": None, "timed_out": True, "stdout": (exc.stdout or "")[:MAX_OUTPUT], "stderr": (exc.stderr or "")[:MAX_OUTPUT]}
+        return {
+            "argv": argv,
+            "exit_code": None,
+            "timed_out": True,
+            "stdout": (exc.stdout or "")[:MAX_OUTPUT],
+            "stderr": (exc.stderr or "")[:MAX_OUTPUT],
+        }
 
 
 def _project_memory_file() -> Path:
@@ -2067,46 +2261,79 @@ def _project_markers(root: Path) -> dict[str, bool]:
 
 
 def _verification_commands(root: Path) -> dict[str, list[list[str]]]:
-    commands: dict[str, list[list[str]]] = {"syntax": [], "test": [], "lint": [], "typecheck": [], "build": [], "compose": []}
-    if (root / "pyproject.toml").exists() or (root / "requirements.txt").exists():
+    commands: dict[str, list[list[str]]] = {
+        "syntax": [],
+        "test": [],
+        "lint": [],
+        "typecheck": [],
+        "build": [],
+        "compose": [],
+    }
+    pyproject = root / "pyproject.toml"
+    if pyproject.exists() or (root / "requirements.txt").exists():
         commands["syntax"].append(["python", "-m", "compileall", "-q", "."])
-    if (root / "tests").exists() or (root / "pytest.ini").exists() or (root / "pyproject.toml").exists():
+    if (root / "tests").exists() or (root / "pytest.ini").exists() or pyproject.exists():
         commands["test"].append(["python", "-m", "pytest", "-q"])
+    if pyproject.exists():
+        pyproject_text = pyproject.read_text(encoding="utf-8", errors="replace")
+        if "[tool.ruff" in pyproject_text:
+            commands["lint"].extend(
+                [
+                    ["python", "-m", "ruff", "check", "."],
+                    ["python", "-m", "ruff", "format", "--check", "."],
+                ]
+            )
+        if "[tool.pyright]" in pyproject_text:
+            commands["typecheck"].append(["python", "-m", "pyright"])
     if (root / "package.json").exists():
         for suite in ("test", "lint", "typecheck", "build"):
             commands[suite].append(["npm", "run", "--if-present", suite])
-    if (root / ".mcp-compose-validation.env").exists() and ((root / "docker-compose.yml").exists() or (root / "compose.yml").exists()):
-        commands["compose"].append(["docker", "compose", "--env-file", ".mcp-compose-validation.env", "config", "--quiet"])
+    if (root / ".mcp-compose-validation.env").exists() and (
+        (root / "docker-compose.yml").exists() or (root / "compose.yml").exists()
+    ):
+        commands["compose"].append(
+            ["docker", "compose", "--env-file", ".mcp-compose-validation.env", "config", "--quiet"]
+        )
     return commands
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def project_context(max_files: int = 120) -> str:
     """Return grounded project context: detected stack, root files, Git state, available verification suites, stored notes, and the active safety policy."""
     require_scope("workspace:read")
     root = session_state().current_project
     markers = _project_markers(root)
-    root_files = sorted(path.name for path in root.iterdir())[:min(max(max_files, 1), 500)]
+    root_files = sorted(path.name for path in root.iterdir())[: min(max(max_files, 1), 500)]
     git = _run_argv(["git", "status", "--short", "--branch"], root, 30) if markers["git"] else None
     package_scripts: list[str] = []
     if (root / "package.json").exists():
         try:
-            package_scripts = sorted(json.loads((root / "package.json").read_text(encoding="utf-8")).get("scripts", {}).keys())
+            package_scripts = sorted(
+                json.loads((root / "package.json").read_text(encoding="utf-8")).get("scripts", {}).keys()
+            )
         except (OSError, json.JSONDecodeError, AttributeError):
             package_scripts = []
-    policy = AGENT_POLICY_PATH.read_text(encoding="utf-8")[:12_000] if AGENT_POLICY_PATH.exists() else "No policy file configured."
+    policy = (
+        AGENT_POLICY_PATH.read_text(encoding="utf-8")[:12_000]
+        if AGENT_POLICY_PATH.exists()
+        else "No policy file configured."
+    )
     memory = _load_project_memory()
-    return _json_result({
-        "project": session_state().current_project_name,
-        "path": str(root),
-        "markers": markers,
-        "root_files": root_files,
-        "git": git,
-        "package_scripts": package_scripts,
-        "verification_suites": {name: commands for name, commands in _verification_commands(root).items() if commands},
-        "memory_keys": sorted(memory),
-        "policy": policy,
-    })
+    return _json_result(
+        {
+            "project": session_state().current_project_name,
+            "path": str(root),
+            "markers": markers,
+            "root_files": root_files,
+            "git": git,
+            "package_scripts": package_scripts,
+            "verification_suites": {
+                name: commands for name, commands in _verification_commands(root).items() if commands
+            },
+            "memory_keys": sorted(memory),
+            "policy": policy,
+        }
+    )
 
 
 @mcp.tool()
@@ -2118,14 +2345,14 @@ def project_memory_set(key: str, value: str) -> str:
     if len(value) > 12_000:
         raise ValueError("Memory values are limited to 12,000 characters")
     memory = _load_project_memory()
-    memory[key] = {"updated_at": datetime.now(timezone.utc).isoformat(), "value": value}
+    memory[key] = {"updated_at": datetime.now(UTC).isoformat(), "value": value}
     _save_project_memory(memory)
     _audit("project_memory_set", {"key": key, "characters": len(value)})
     return _json_result({"saved": key, "memory_keys": sorted(memory)})
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
-def project_memory_get(key: Optional[str] = None) -> str:
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
+def project_memory_get(key: str | None = None) -> str:
     """Read one persistent project memory entry, or list available memory keys."""
     require_scope("workspace:read")
     memory = _load_project_memory()
@@ -2137,7 +2364,7 @@ def project_memory_get(key: Optional[str] = None) -> str:
 
 
 @mcp.tool()
-def project_checkpoint(summary: str, next_steps: list[str], verification: Optional[dict[str, Any]] = None) -> str:
+def project_checkpoint(summary: str, next_steps: list[str], verification: dict[str, Any] | None = None) -> str:
     """Create a durable progress checkpoint outside the repository for long-running agent work."""
     require_scope("workspace:write")
     if len(summary) > 12_000 or len(next_steps) > 50:
@@ -2145,14 +2372,21 @@ def project_checkpoint(summary: str, next_steps: list[str], verification: Option
     root = _identity_storage_root(MEMORY_ROOT) / "checkpoints"
     root.mkdir(parents=True, exist_ok=True)
     checkpoint_id = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
-    payload = {"id": checkpoint_id, "at": datetime.now(timezone.utc).isoformat(), "project": str(session_state().current_project), "summary": summary, "next_steps": next_steps, "verification": verification or {}}
+    payload = {
+        "id": checkpoint_id,
+        "at": datetime.now(UTC).isoformat(),
+        "project": str(session_state().current_project),
+        "summary": summary,
+        "next_steps": next_steps,
+        "verification": verification or {},
+    }
     (root / f"{checkpoint_id}.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     _audit("project_checkpoint", {"checkpoint_id": checkpoint_id, "next_step_count": len(next_steps)})
     return _json_result(payload)
 
 
 @mcp.tool()
-def project_verify(suites: Optional[list[str]] = None, timeout_seconds: int = 300) -> str:
+def project_verify(suites: list[str] | None = None, timeout_seconds: int = 300) -> str:
     """Run detected fixed verification suites (syntax, test, lint, typecheck, build, compose) and return grounded pass/fail evidence."""
     require_scope("command:run")
     root = session_state().current_project
@@ -2161,17 +2395,27 @@ def project_verify(suites: Optional[list[str]] = None, timeout_seconds: int = 30
     allowed = set(available)
     if unknown := set(selected) - allowed:
         raise ValueError(f"Unknown verification suite(s): {', '.join(sorted(unknown))}")
-    results: dict[str, list[dict[str, Any]]] = {}
+
+    results: dict[str, dict[str, Any]] = {}
     timeout = min(max(timeout_seconds, 1), 600)
     for suite in selected:
-        results[suite] = [_run_argv(command, root, timeout) for command in available[suite]]
-    passed = all(item["exit_code"] == 0 and not item["timed_out"] for items in results.values() for item in items)
+        commands = available[suite]
+        if not commands:
+            results[suite] = {"status": "not_configured", "commands": []}
+            continue
+        command_results = [_run_argv(command, root, timeout) for command in commands]
+        status = (
+            "passed" if all(item["exit_code"] == 0 and not item["timed_out"] for item in command_results) else "failed"
+        )
+        results[suite] = {"status": status, "commands": command_results}
+
+    passed = all(result["status"] == "passed" for result in results.values())
     payload = {"project": str(root), "selected_suites": selected, "passed": passed, "results": results}
     _audit("project_verify", {"suites": selected, "passed": passed})
     return _json_result(payload)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def self_improvement_readiness() -> str:
     """Assess whether the active project is the isolated self-improvement checkout and report the branch, policy, verification, and credential prerequisites."""
     require_scope("workspace:read")
@@ -2180,27 +2424,29 @@ def self_improvement_readiness() -> str:
     markers = _project_markers(root)
     git = _run_argv(["git", "status", "--short", "--branch"], root, 30) if markers["git"] else None
     origin = _run_argv(["git", "remote", "get-url", "origin"], root, 30) if markers["git"] else None
-    return _json_result({
-        "ready": is_self_workspace and markers["git"] and AGENT_POLICY_PATH.exists(),
-        "is_isolated_self_workspace": is_self_workspace,
-        "expected_workspace_name": SELF_IMPROVEMENT_WORKSPACE,
-        "git": git,
-        "origin": origin,
-        "verification_suites": [name for name, commands in _verification_commands(root).items() if commands],
-        "github_pr_requirement": "Configure a fine-grained GitHub token as GITHUB_TOKEN in /config/secrets.json, then use github_push_branch and github_create_pull_request.",
-        "deployment_requirement": "Use deployment_preflight and require explicit user approval before deployment_apply or deployment_rollback.",
-        "policy_present": AGENT_POLICY_PATH.exists(),
-    })
+    return _json_result(
+        {
+            "ready": is_self_workspace and markers["git"] and AGENT_POLICY_PATH.exists(),
+            "is_isolated_self_workspace": is_self_workspace,
+            "expected_workspace_name": SELF_IMPROVEMENT_WORKSPACE,
+            "git": git,
+            "origin": origin,
+            "verification_suites": [name for name, commands in _verification_commands(root).items() if commands],
+            "github_pr_requirement": "Configure a fine-grained GitHub token as GITHUB_TOKEN in /config/secrets.json, then use github_push_branch and github_create_pull_request.",
+            "deployment_requirement": "Use deployment_preflight and require explicit user approval before deployment_apply or deployment_rollback.",
+            "policy_present": AGENT_POLICY_PATH.exists(),
+        }
+    )
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def audit_events(max_entries: int = 100) -> str:
     """Return recent credential-free audit records for the authenticated identity."""
     require_scope("workspace:read")
     target = _identity_storage_root(AUDIT_ROOT) / "events.jsonl"
     if not target.exists():
         return _json_result({"events": []})
-    lines = target.read_text(encoding="utf-8", errors="replace").splitlines()[-min(max(max_entries, 1), 1000):]
+    lines = target.read_text(encoding="utf-8", errors="replace").splitlines()[-min(max(max_entries, 1), 1000) :]
     return _json_result({"events": [json.loads(line) for line in lines if line.strip()]})
 
 
@@ -2215,13 +2461,21 @@ def deployment_preflight(cwd: str = ".") -> str:
     config = _run_argv(["docker", "compose", "config", "--quiet"], root, 120)
     status = _run_argv(["docker", "compose", "ps", "--all"], root, 60)
     snapshot = create_snapshot(f"predeploy-{int(time.time())}")
-    payload = {"project": str(root), "config": config, "status": status, "snapshot": snapshot, "ready": config["exit_code"] == 0}
+    payload = {
+        "project": str(root),
+        "config": config,
+        "status": status,
+        "snapshot": snapshot,
+        "ready": config["exit_code"] == 0,
+    }
     _audit("deployment_preflight", {"project": str(root), "ready": payload["ready"]})
     return _json_result(payload)
 
 
 @mcp.tool()
-def deployment_apply(approval: str, services: Optional[list[str]] = None, health_url: Optional[str] = None, cwd: str = ".") -> str:
+def deployment_apply(
+    approval: str, services: list[str] | None = None, health_url: str | None = None, cwd: str = "."
+) -> str:
     """Build and apply a Compose deployment. Requires the exact user approval phrase I_APPROVE_DEPLOYMENT and optional HTTP health evidence."""
     require_scope("deploy:run")
     require_scope("workspace:write")
@@ -2236,7 +2490,12 @@ def deployment_apply(approval: str, services: Optional[list[str]] = None, health
         return _json_result({"deployed": False, "preflight": preflight})
     result = _run_argv(["docker", "compose", "up", "--build", "--detach", *service_args], root, 600)
     health = json.loads(wait_for_http_health(health_url)) if health_url and result["exit_code"] == 0 else None
-    payload = {"deployed": result["exit_code"] == 0 and (health is None or health.get("healthy") is True), "preflight": preflight, "apply": result, "health": health}
+    payload = {
+        "deployed": result["exit_code"] == 0 and (health is None or health.get("healthy") is True),
+        "preflight": preflight,
+        "apply": result,
+        "health": health,
+    }
     _audit("deployment_apply", {"project": str(root), "services": service_args, "deployed": payload["deployed"]})
     return _json_result(payload)
 
@@ -2252,7 +2511,9 @@ def deployment_rollback(snapshot_id: str, approval: str, cwd: str = ".") -> str:
     root = resolve_path(cwd)
     result = _run_argv(["docker", "compose", "up", "--build", "--detach"], root, 600)
     payload = {"restored": restore, "apply": result, "rolled_back": result["exit_code"] == 0}
-    _audit("deployment_rollback", {"project": str(root), "snapshot_id": snapshot_id, "rolled_back": payload["rolled_back"]})
+    _audit(
+        "deployment_rollback", {"project": str(root), "snapshot_id": snapshot_id, "rolled_back": payload["rolled_back"]}
+    )
     return _json_result(payload)
 
 
@@ -2265,8 +2526,20 @@ def github_push_branch(branch: str, secret_ref: str = "GITHUB_TOKEN", cwd: str =
         raise ValueError("Invalid branch name")
     token = _secret_values([secret_ref])[secret_ref]
     root = resolve_path(cwd)
-    auth = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
-    result = _run_argv(["git", "-c", f"http.https://github.com/.extraheader=AUTHORIZATION: Basic {auth}", "push", "--set-upstream", "origin", branch], root, 300)
+    auth = base64.b64encode(f"x-access-token:{token}".encode()).decode("ascii")
+    result = _run_argv(
+        [
+            "git",
+            "-c",
+            f"http.https://github.com/.extraheader=AUTHORIZATION: Basic {auth}",
+            "push",
+            "--set-upstream",
+            "origin",
+            branch,
+        ],
+        root,
+        300,
+    )
     safe_result = dict(result)
     safe_result["argv"] = ["git", "push", "--set-upstream", "origin", branch]
     _audit("github_push_branch", {"branch": branch, "exit_code": result["exit_code"]})
@@ -2274,14 +2547,26 @@ def github_push_branch(branch: str, secret_ref: str = "GITHUB_TOKEN", cwd: str =
 
 
 @mcp.tool()
-def github_create_pull_request(repository: str, head: str, title: str, body: str, base: str = "main", secret_ref: str = "GITHUB_TOKEN") -> str:
+def github_create_pull_request(
+    repository: str, head: str, title: str, body: str, base: str = "main", secret_ref: str = "GITHUB_TOKEN"
+) -> str:
     """Create a GitHub pull request with an ephemeral fine-grained token. Requires repository format owner/name and github:write."""
     require_scope("github:write")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
         raise ValueError("repository must be owner/name")
     token = _secret_values([secret_ref])[secret_ref]
     payload = json.dumps({"title": title[:256], "head": head, "base": base, "body": body[:60_000]}).encode("utf-8")
-    request = urllib.request.Request(f"https://api.github.com/repos/{repository}/pulls", data=payload, method="POST", headers={"Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}", "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json"})
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{repository}/pulls",
+        data=payload,
+        method="POST",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": "application/json",
+        },
+    )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             result = json.loads(response.read(200_000).decode("utf-8"))
@@ -2380,7 +2665,7 @@ def install_node_packages(packages: list[str], dev: bool = False, package_manage
 
 
 @mcp.tool()
-def install_project_dependencies(package_manager: Optional[str] = None) -> str:
+def install_project_dependencies(package_manager: str | None = None) -> str:
     """Install dependencies for the active project."""
     require_scope("workspace:write")
     if package_manager is None:
@@ -2416,6 +2701,7 @@ def install_project_dependencies(package_manager: Optional[str] = None) -> str:
 # Advanced low-level primitives. These keep the broad agent capability available
 # while providing structured inputs and outputs for reliable higher-level flows.
 
+
 def _secret_values(names: list[str]) -> dict[str, str]:
     if not names:
         return {}
@@ -2431,7 +2717,7 @@ def _secret_values(names: list[str]) -> dict[str, str]:
     return {name: values[name] for name in names}
 
 
-def _command_environment(environment: Optional[dict[str, str]], secret_refs: Optional[list[str]]) -> dict[str, str]:
+def _command_environment(environment: dict[str, str] | None, secret_refs: list[str] | None) -> dict[str, str]:
     env = os.environ.copy()
     env["HOME"] = str(session_state().current_project)
     for name, value in (environment or {}).items():
@@ -2446,11 +2732,11 @@ def _command_environment(environment: Optional[dict[str, str]], secret_refs: Opt
 def run_command_advanced(
     argv: list[str],
     cwd: str = ".",
-    environment: Optional[dict[str, str]] = None,
-    secret_refs: Optional[list[str]] = None,
-    stdin: Optional[str] = None,
+    environment: dict[str, str] | None = None,
+    secret_refs: list[str] | None = None,
+    stdin: str | None = None,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
-    output_file: Optional[str] = None,
+    output_file: str | None = None,
 ) -> str:
     """Run an argv command without shell parsing. Supports controlled environment values, named secret injection, stdin, timeout, and optional captured-output file. Secret values are never returned by this tool."""
     require_scope("command:run")
@@ -2488,17 +2774,19 @@ def run_command_advanced(
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(combined, encoding="utf-8")
         output_path = str(target)
-    return _format_browser_result({
-        "argv": argv,
-        "cwd": str(working_dir),
-        "exit_code": None if timed_out else result.returncode,
-        "timed_out": timed_out,
-        "timeout_seconds": timeout,
-        "stdout": stdout[:MAX_OUTPUT],
-        "stderr": stderr[:MAX_OUTPUT],
-        "output_file": output_path,
-        "secret_refs_used": secret_refs or [],
-    })
+    return _format_browser_result(
+        {
+            "argv": argv,
+            "cwd": str(working_dir),
+            "exit_code": None if result is None else result.returncode,
+            "timed_out": timed_out,
+            "timeout_seconds": timeout,
+            "stdout": stdout[:MAX_OUTPUT],
+            "stderr": stderr[:MAX_OUTPUT],
+            "output_file": output_path,
+            "secret_refs_used": secret_refs or [],
+        }
+    )
 
 
 @mcp.tool()
@@ -2511,7 +2799,9 @@ def file_hash(file_path: str, algorithm: str = "sha256") -> str:
     with target.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
-    return _format_browser_result({"path": str(target), "algorithm": algorithm, "digest": digest.hexdigest(), "size_bytes": target.stat().st_size})
+    return _format_browser_result(
+        {"path": str(target), "algorithm": algorithm, "digest": digest.hexdigest(), "size_bytes": target.stat().st_size}
+    )
 
 
 @mcp.tool()
@@ -2520,11 +2810,18 @@ def read_binary_file(file_path: str, max_bytes: int = 500_000) -> str:
     target = resolve_path(file_path)
     limit = min(max(max_bytes, 1), MAX_READ_BYTES)
     data = target.read_bytes()[:limit]
-    return _format_browser_result({"path": str(target), "data_base64": base64.b64encode(data).decode("ascii"), "size_bytes_returned": len(data), "truncated": target.stat().st_size > len(data)})
+    return _format_browser_result(
+        {
+            "path": str(target),
+            "data_base64": base64.b64encode(data).decode("ascii"),
+            "size_bytes_returned": len(data),
+            "truncated": target.stat().st_size > len(data),
+        }
+    )
 
 
 @mcp.tool()
-def write_binary_file(file_path: str, data_base64: str, expected_sha256: Optional[str] = None) -> str:
+def write_binary_file(file_path: str, data_base64: str, expected_sha256: str | None = None) -> str:
     """Write base64 binary data atomically within the assigned workspace."""
     require_scope("workspace:write")
     try:
@@ -2538,11 +2835,13 @@ def write_binary_file(file_path: str, data_base64: str, expected_sha256: Optiona
     temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
     temporary.write_bytes(data)
     temporary.replace(target)
-    return _format_browser_result({"path": str(target), "size_bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+    return _format_browser_result(
+        {"path": str(target), "size_bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    )
 
 
 @mcp.tool()
-def atomic_write_file(file_path: str, contents: str, expected_sha256: Optional[str] = None) -> str:
+def atomic_write_file(file_path: str, contents: str, expected_sha256: str | None = None) -> str:
     """Atomically replace a text file, optionally only when its current SHA-256 matches."""
     require_scope("workspace:write")
     target = resolve_path(file_path)
@@ -2554,7 +2853,9 @@ def atomic_write_file(file_path: str, contents: str, expected_sha256: Optional[s
     temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
     temporary.write_text(contents, encoding="utf-8")
     temporary.replace(target)
-    return _format_browser_result({"path": str(target), "sha256": hashlib.sha256(contents.encode()).hexdigest(), "characters": len(contents)})
+    return _format_browser_result(
+        {"path": str(target), "sha256": hashlib.sha256(contents.encode()).hexdigest(), "characters": len(contents)}
+    )
 
 
 @mcp.tool()
@@ -2566,7 +2867,9 @@ def diff_files(left_path: str, right_path: str, context_lines: int = 3) -> str:
     diff = difflib.unified_diff(
         left.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True),
         right.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True),
-        fromfile=str(left), tofile=str(right), n=context,
+        fromfile=str(left),
+        tofile=str(right),
+        n=context,
     )
     return "".join(diff)[:MAX_OUTPUT]
 
@@ -2584,7 +2887,9 @@ def search_all_matches(query: str, directory: str = ".", max_results: int = 500,
         if not path.is_file() or any(part in {".git", "node_modules", ".venv"} for part in path.parts):
             continue
         try:
-            for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
+            for line_number, line in enumerate(
+                path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1
+            ):
                 haystack = line if case_sensitive else line.lower()
                 if needle in haystack:
                     rows.append(f"{path}:{line_number}: {line}")
@@ -2619,7 +2924,7 @@ def create_symlink(target: str, link_path: str) -> str:
     return f"Created symlink {link} -> {source}"
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def read_symlink(path: str) -> str:
     """Return a symbolic link target after validating that it remains in the workspace."""
     require_scope("workspace:read")
@@ -2639,7 +2944,9 @@ def read_symlink(path: str) -> str:
     resolved = link.resolve()
     if not _is_allowed_path(resolved, roots):
         raise PermissionError("Symbolic link target is outside the assigned workspace")
-    return _format_browser_result({"path": str(link), "link_target": str(link.readlink()), "resolved_target": str(resolved)})
+    return _format_browser_result(
+        {"path": str(link), "link_target": str(link.readlink()), "resolved_target": str(resolved)}
+    )
 
 
 @mcp.tool()
@@ -2653,7 +2960,7 @@ def git_show(revision: str = "HEAD", cwd: str = ".") -> str:
 
 
 @mcp.tool()
-def git_blame(file_path: str, start_line: Optional[int] = None, end_line: Optional[int] = None, cwd: str = ".") -> str:
+def git_blame(file_path: str, start_line: int | None = None, end_line: int | None = None, cwd: str = ".") -> str:
     line_range = "" if start_line is None else f" -L {max(start_line, 1)},{max(end_line or start_line, start_line)}"
     return shell(f"git blame{line_range} -- {shlex.quote(file_path)}", cwd)
 
@@ -2664,21 +2971,21 @@ def git_fetch(remote: str = "origin", cwd: str = ".") -> str:
 
 
 @mcp.tool()
-def git_pull(remote: str = "origin", branch: Optional[str] = None, rebase: bool = True, cwd: str = ".") -> str:
+def git_pull(remote: str = "origin", branch: str | None = None, rebase: bool = True, cwd: str = ".") -> str:
     require_scope("workspace:write")
     branch_part = f" {shlex.quote(branch)}" if branch else ""
     return shell(f"git pull {'--rebase ' if rebase else ''}{shlex.quote(remote)}{branch_part}", cwd)
 
 
 @mcp.tool()
-def git_push(remote: str = "origin", branch: Optional[str] = None, set_upstream: bool = False, cwd: str = ".") -> str:
+def git_push(remote: str = "origin", branch: str | None = None, set_upstream: bool = False, cwd: str = ".") -> str:
     require_scope("workspace:write")
     branch_part = f" {shlex.quote(branch)}" if branch else ""
     return shell(f"git push {'-u ' if set_upstream else ''}{shlex.quote(remote)}{branch_part}", cwd)
 
 
 @mcp.tool()
-def git_stash(action: str = "push", message: Optional[str] = None, cwd: str = ".") -> str:
+def git_stash(action: str = "push", message: str | None = None, cwd: str = ".") -> str:
     require_scope("workspace:write")
     if action not in {"push", "pop", "list", "drop"}:
         raise ValueError("action must be push, pop, list, or drop")
@@ -2687,7 +2994,7 @@ def git_stash(action: str = "push", message: Optional[str] = None, cwd: str = ".
 
 
 @mcp.tool()
-def git_worktree(action: str, path: Optional[str] = None, branch: Optional[str] = None, cwd: str = ".") -> str:
+def git_worktree(action: str, path: str | None = None, branch: str | None = None, cwd: str = ".") -> str:
     """List, add, or remove Git worktrees. Added paths must be in the assigned workspace."""
     require_scope("workspace:write")
     if action == "list":
@@ -2709,8 +3016,8 @@ def git_worktree(action: str, path: Optional[str] = None, branch: Optional[str] 
 def http_request(
     url: str,
     method: str = "GET",
-    headers: Optional[dict[str, str]] = None,
-    body: Optional[str] = None,
+    headers: dict[str, str] | None = None,
+    body: str | None = None,
     timeout_seconds: int = 20,
 ) -> str:
     """Make an HTTP request with method, headers, and optional text/JSON body. Response headers, status, timing, and bounded body are returned."""
@@ -2719,13 +3026,32 @@ def http_request(
     if parsed.scheme not in {"http", "https"}:
         raise ValueError("Only http and https URLs are supported")
     started = time.monotonic()
-    request = urllib.request.Request(url, method=method.upper(), headers=headers or {}, data=body.encode("utf-8") if body is not None else None)
+    request = urllib.request.Request(
+        url, method=method.upper(), headers=headers or {}, data=body.encode("utf-8") if body is not None else None
+    )
     try:
         with urllib.request.urlopen(request, timeout=min(max(timeout_seconds, 1), 120)) as response:
             payload = response.read(150_000)
-            return _format_browser_result({"url": response.url, "status": response.status, "headers": dict(response.headers.items()), "elapsed_ms": round((time.monotonic() - started) * 1000, 1), "body": payload.decode("utf-8", errors="replace"), "truncated": response.length is not None and response.length > len(payload)})
+            return _format_browser_result(
+                {
+                    "url": response.url,
+                    "status": response.status,
+                    "headers": dict(response.headers.items()),
+                    "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+                    "body": payload.decode("utf-8", errors="replace"),
+                    "truncated": response.length is not None and response.length > len(payload),
+                }
+            )
     except urllib.error.HTTPError as exc:
-        return _format_browser_result({"url": url, "status": exc.code, "headers": dict(exc.headers.items()), "elapsed_ms": round((time.monotonic() - started) * 1000, 1), "body": exc.read(150_000).decode("utf-8", errors="replace")})
+        return _format_browser_result(
+            {
+                "url": url,
+                "status": exc.code,
+                "headers": dict(exc.headers.items()),
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+                "body": exc.read(150_000).decode("utf-8", errors="replace"),
+            }
+        )
 
 
 @mcp.tool()
@@ -2740,11 +3066,21 @@ def http_download(url: str, destination: str, timeout_seconds: int = 60, max_byt
         if len(data) > max_bytes:
             raise ValueError("Download exceeded max_bytes")
         target.write_bytes(data)
-        return _format_browser_result({"url": response.url, "status": response.status, "path": str(target), "size_bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+        return _format_browser_result(
+            {
+                "url": response.url,
+                "status": response.status,
+                "path": str(target),
+                "size_bytes": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }
+        )
 
 
 @mcp.tool()
-def http_upload(url: str, source_file: str, method: str = "PUT", headers: Optional[dict[str, str]] = None, timeout_seconds: int = 60) -> str:
+def http_upload(
+    url: str, source_file: str, method: str = "PUT", headers: dict[str, str] | None = None, timeout_seconds: int = 60
+) -> str:
     """Upload a workspace file as a raw HTTP request body."""
     require_scope("network:fetch")
     source = resolve_path(source_file)
@@ -2752,12 +3088,28 @@ def http_upload(url: str, source_file: str, method: str = "PUT", headers: Option
     started = time.monotonic()
     try:
         with urllib.request.urlopen(request, timeout=min(max(timeout_seconds, 1), 120)) as response:
-            return _format_browser_result({"url": response.url, "status": response.status, "headers": dict(response.headers.items()), "elapsed_ms": round((time.monotonic() - started) * 1000, 1), "body": response.read(150_000).decode("utf-8", errors="replace")})
+            return _format_browser_result(
+                {
+                    "url": response.url,
+                    "status": response.status,
+                    "headers": dict(response.headers.items()),
+                    "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+                    "body": response.read(150_000).decode("utf-8", errors="replace"),
+                }
+            )
     except urllib.error.HTTPError as exc:
-        return _format_browser_result({"url": url, "status": exc.code, "headers": dict(exc.headers.items()), "elapsed_ms": round((time.monotonic() - started) * 1000, 1), "body": exc.read(150_000).decode("utf-8", errors="replace")})
+        return _format_browser_result(
+            {
+                "url": url,
+                "status": exc.code,
+                "headers": dict(exc.headers.items()),
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+                "body": exc.read(150_000).decode("utf-8", errors="replace"),
+            }
+        )
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def dns_lookup(hostname: str) -> str:
     """Resolve a hostname to IP addresses."""
     require_scope("network:fetch")
@@ -2765,26 +3117,49 @@ def dns_lookup(hostname: str) -> str:
     return _format_browser_result({"hostname": hostname, "addresses": results})
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def tcp_check(hostname: str, port: int, timeout_seconds: int = 5) -> str:
     """Check TCP connectivity and report latency."""
     require_scope("network:fetch")
     started = time.monotonic()
     try:
         with socket.create_connection((hostname, port), timeout=min(max(timeout_seconds, 1), 30)):
-            return _format_browser_result({"hostname": hostname, "port": port, "reachable": True, "elapsed_ms": round((time.monotonic() - started) * 1000, 1)})
+            return _format_browser_result(
+                {
+                    "hostname": hostname,
+                    "port": port,
+                    "reachable": True,
+                    "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+                }
+            )
     except OSError as exc:
-        return _format_browser_result({"hostname": hostname, "port": port, "reachable": False, "error": str(exc), "elapsed_ms": round((time.monotonic() - started) * 1000, 1)})
+        return _format_browser_result(
+            {
+                "hostname": hostname,
+                "port": port,
+                "reachable": False,
+                "error": str(exc),
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+            }
+        )
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def tls_certificate(hostname: str, port: int = 443, timeout_seconds: int = 10) -> str:
     """Inspect a TLS certificate and protocol for a host."""
     require_scope("network:fetch")
     context = ssl.create_default_context()
     with socket.create_connection((hostname, port), timeout=min(max(timeout_seconds, 1), 30)) as raw:
         with context.wrap_socket(raw, server_hostname=hostname) as secure:
-            return _format_browser_result({"hostname": hostname, "port": port, "protocol": secure.version(), "cipher": secure.cipher(), "certificate": secure.getpeercert()})
+            return _format_browser_result(
+                {
+                    "hostname": hostname,
+                    "port": port,
+                    "protocol": secure.version(),
+                    "cipher": secure.cipher(),
+                    "certificate": secure.getpeercert(),
+                }
+            )
 
 
 @mcp.tool()
@@ -2794,7 +3169,9 @@ async def browser_session_upload(session_id: str, selector: str, files: list[str
     record = _get_browser_session(session_id)
     paths = [str(resolve_path(path)) for path in files]
     await record.page.locator(selector).set_input_files(paths)
-    return _format_browser_result({"session_id": session_id, "selector": selector, "files": paths, "url": record.page.url})
+    return _format_browser_result(
+        {"session_id": session_id, "selector": selector, "files": paths, "url": record.page.url}
+    )
 
 
 @mcp.tool()
@@ -2808,7 +3185,9 @@ async def browser_session_frame_evaluate(session_id: str, frame_selector: str, s
 
 
 @mcp.tool()
-async def browser_session_route(session_id: str, url_pattern: str, action: str = "abort", fulfill_body: Optional[str] = None, status: int = 200) -> str:
+async def browser_session_route(
+    session_id: str, url_pattern: str, action: str = "abort", fulfill_body: str | None = None, status: int = 200
+) -> str:
     """Persistently intercept browser-session requests: abort them or fulfill them with a controlled text response."""
     require_scope("browser:use")
     record = _get_browser_session(session_id)
@@ -2838,19 +3217,32 @@ async def browser_session_trace(session_id: str, destination: str) -> str:
 
 
 @mcp.tool()
-async def browser_session_import_storage(session_id: str, local_storage: Optional[dict[str, str]] = None, session_storage: Optional[dict[str, str]] = None) -> str:
+async def browser_session_import_storage(
+    session_id: str, local_storage: dict[str, str] | None = None, session_storage: dict[str, str] | None = None
+) -> str:
     """Set localStorage and sessionStorage values in the current persistent browser-session page."""
     require_scope("browser:use")
     record = _get_browser_session(session_id)
-    await record.page.evaluate("""({localStorageValues, sessionStorageValues}) => {
+    await record.page.evaluate(
+        """({localStorageValues, sessionStorageValues}) => {
         for (const [key, value] of Object.entries(localStorageValues || {})) localStorage.setItem(key, value);
         for (const [key, value] of Object.entries(sessionStorageValues || {})) sessionStorage.setItem(key, value);
-    }""", {"localStorageValues": local_storage or {}, "sessionStorageValues": session_storage or {}})
-    return _format_browser_result({"session_id": session_id, "local_storage_keys": sorted((local_storage or {}).keys()), "session_storage_keys": sorted((session_storage or {}).keys())})
+    }""",
+        {"localStorageValues": local_storage or {}, "sessionStorageValues": session_storage or {}},
+    )
+    return _format_browser_result(
+        {
+            "session_id": session_id,
+            "local_storage_keys": sorted((local_storage or {}).keys()),
+            "session_storage_keys": sorted((session_storage or {}).keys()),
+        }
+    )
 
 
 @mcp.tool()
-def database_query(engine: str, query: str, database: Optional[str] = None, secret_ref: Optional[str] = None, timeout_seconds: int = 30) -> str:
+def database_query(
+    engine: str, query: str, database: str | None = None, secret_ref: str | None = None, timeout_seconds: int = 30
+) -> str:
     """Run a SQLite query against a workspace database or a PostgreSQL query using a named secret connection URL. Use only for trusted development databases."""
     require_scope("database:use")
     timeout = min(max(timeout_seconds, 1), 120)
@@ -2863,21 +3255,33 @@ def database_query(engine: str, query: str, database: Optional[str] = None, secr
         if not secret_ref:
             raise ValueError("Postgres requires a secret_ref containing its connection URL")
         connection = _secret_values([secret_ref])[secret_ref]
-        result = subprocess.run(["psql", connection, "--no-psqlrc", "--tuples-only", "--no-align", "-c", query], text=True, capture_output=True, timeout=timeout)
+        result = subprocess.run(
+            ["psql", connection, "--no-psqlrc", "--tuples-only", "--no-align", "-c", query],
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
     else:
         raise ValueError("engine must be sqlite or postgres")
-    return _format_browser_result({"engine": engine, "exit_code": result.returncode, "stdout": result.stdout[:MAX_OUTPUT], "stderr": result.stderr[:MAX_OUTPUT]})
+    return _format_browser_result(
+        {
+            "engine": engine,
+            "exit_code": result.returncode,
+            "stdout": result.stdout[:MAX_OUTPUT],
+            "stderr": result.stderr[:MAX_OUTPUT],
+        }
+    )
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def compose_status(cwd: str = ".") -> str:
     """Return Docker Compose service state for a project."""
     require_scope("deploy:run")
     return shell("docker compose ps --all", cwd)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
-def compose_logs(service: Optional[str] = None, tail: int = 200, cwd: str = ".") -> str:
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
+def compose_logs(service: str | None = None, tail: int = 200, cwd: str = ".") -> str:
     """Return bounded recent Docker Compose logs."""
     require_scope("deploy:run")
     suffix = f" {shlex.quote(service)}" if service else ""
@@ -2885,7 +3289,7 @@ def compose_logs(service: Optional[str] = None, tail: int = 200, cwd: str = ".")
 
 
 @mcp.tool()
-def compose_restart(services: Optional[list[str]] = None, cwd: str = ".") -> str:
+def compose_restart(services: list[str] | None = None, cwd: str = ".") -> str:
     """Restart all or selected Docker Compose services."""
     require_scope("deploy:run")
     require_scope("workspace:write")
@@ -2893,13 +3297,13 @@ def compose_restart(services: Optional[list[str]] = None, cwd: str = ".") -> str
     return shell(f"docker compose restart {suffix}".rstrip(), cwd)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def wait_for_http_health(url: str, expected_status: int = 200, timeout_seconds: int = 60) -> str:
     """Poll an HTTP endpoint until it returns the expected status or times out."""
     require_scope("deploy:run")
     deadline = time.monotonic() + min(max(timeout_seconds, 1), 300)
-    last_status: Optional[int] = None
-    last_error: Optional[str] = None
+    last_status: int | None = None
+    last_error: str | None = None
     while time.monotonic() < deadline:
         try:
             with urllib.request.urlopen(url, timeout=5) as response:
@@ -2911,16 +3315,24 @@ def wait_for_http_health(url: str, expected_status: int = 200, timeout_seconds: 
         except OSError as exc:
             last_error = str(exc)
         time.sleep(1)
-    return _format_browser_result({"healthy": False, "url": url, "expected_status": expected_status, "last_status": last_status, "last_error": last_error})
+    return _format_browser_result(
+        {
+            "healthy": False,
+            "url": url,
+            "expected_status": expected_status,
+            "last_status": last_status,
+            "last_error": last_error,
+        }
+    )
 
 
 @mcp.tool()
 def start_process_advanced(
     argv: list[str],
     cwd: str = ".",
-    name: Optional[str] = None,
-    environment: Optional[dict[str, str]] = None,
-    secret_refs: Optional[list[str]] = None,
+    name: str | None = None,
+    environment: dict[str, str] | None = None,
+    secret_refs: list[str] | None = None,
     allow_stdin: bool = False,
 ) -> str:
     """Start an argv background process without shell parsing, with controlled environment, optional named secrets, and optional stdin forwarding."""
@@ -2946,9 +3358,22 @@ def start_process_advanced(
     record = ProcessRecord(command=shlex.join(argv), cwd=working_dir, process=process, started_at=time.time())
     with PROCESS_LOCK:
         state.processes[process_id] = record
-    threading.Thread(target=_read_process_output, args=(process_id, record), daemon=True, name=f"process-output-{process_id}").start()
-    state.command_history.append(f"[{state.current_project_name}] {working_dir}$ {shlex.join(argv)}  # process={process_id}")
-    return _format_browser_result({"process_id": process_id, "pid": process.pid, "cwd": str(working_dir), "argv": argv, "stdin_enabled": allow_stdin, "secret_refs_used": secret_refs or []})
+    threading.Thread(
+        target=_read_process_output, args=(process_id, record), daemon=True, name=f"process-output-{process_id}"
+    ).start()
+    state.command_history.append(
+        f"[{state.current_project_name}] {working_dir}$ {shlex.join(argv)}  # process={process_id}"
+    )
+    return _format_browser_result(
+        {
+            "process_id": process_id,
+            "pid": process.pid,
+            "cwd": str(working_dir),
+            "argv": argv,
+            "stdin_enabled": allow_stdin,
+            "secret_refs_used": secret_refs or [],
+        }
+    )
 
 
 @mcp.tool()
@@ -2964,7 +3389,9 @@ def send_process_input(process_id: str, data: str, append_newline: bool = True) 
         raise ValueError("Process has already exited")
     record.process.stdin.write(data + ("\n" if append_newline else ""))
     record.process.stdin.flush()
-    return _format_browser_result({"process_id": process_id, "characters_sent": len(data), "newline_appended": append_newline})
+    return _format_browser_result(
+        {"process_id": process_id, "characters_sent": len(data), "newline_appended": append_newline}
+    )
 
 
 @mcp.tool()
@@ -2980,10 +3407,12 @@ def signal_process(process_id: str, signal_name: str = "TERM") -> str:
         raise ValueError(f"Unsupported signal: {signal_name}")
     if record.process.poll() is None:
         os.killpg(record.process.pid, signal_number)
-    return _format_browser_result({"process_id": process_id, "signal": signal_name.upper(), "status": _process_status(record)})
+    return _format_browser_result(
+        {"process_id": process_id, "signal": signal_name.upper(), "status": _process_status(record)}
+    )
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def port_owner(port: int) -> str:
     """Report listeners bound to a local TCP or UDP port."""
     require_scope("command:run")
@@ -3004,7 +3433,15 @@ async def browser_session_download(session_id: str, action: dict[str, Any], dest
     download = await download_info.value
     await download.save_as(str(target))
     data = target.read_bytes()
-    return _format_browser_result({"session_id": session_id, "path": str(target), "suggested_filename": download.suggested_filename, "size_bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+    return _format_browser_result(
+        {
+            "session_id": session_id,
+            "path": str(target),
+            "suggested_filename": download.suggested_filename,
+            "size_bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+    )
 
 
 @mcp.tool()
@@ -3022,6 +3459,7 @@ async def browser_session_popup(session_id: str, action: dict[str, Any], timeout
     summary = await _collect_page_summary(popup, include_text=True)
     summary.update({"session_id": session_id, "popup": True})
     return _format_browser_result(summary)
+
 
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")
