@@ -2074,8 +2074,8 @@ def _verification_commands(root: Path) -> dict[str, list[list[str]]]:
     if (root / "package.json").exists():
         for suite in ("test", "lint", "typecheck", "build"):
             commands[suite].append(["npm", "run", "--if-present", suite])
-    if (root / "docker-compose.yml").exists() or (root / "compose.yml").exists():
-        commands["compose"].append(["docker", "compose", "config", "--quiet"])
+    if (root / ".mcp-compose-validation.env").exists() and ((root / "docker-compose.yml").exists() or (root / "compose.yml").exists()):
+        commands["compose"].append(["docker", "compose", "--env-file", ".mcp-compose-validation.env", "config", "--quiet"])
     return commands
 
 
