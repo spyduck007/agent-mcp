@@ -8,8 +8,6 @@ REALM=agent-mcp
 CLIENT_ID=chatgpt-agent-mcp
 CLIENT_SECRET=${KEYCLOAK_CHATGPT_CLIENT_SECRET:?KEYCLOAK_CHATGPT_CLIENT_SECRET is required}
 USER_NAME=${KEYCLOAK_MCP_USERNAME:?KEYCLOAK_MCP_USERNAME is required}
-# A deterministic UUID makes the Keycloak `sub` claim known before first login.
-USER_ID=00000000-0000-4000-8000-000000000001
 
 until "$KCADM" config credentials \
   --server "$SERVER" \
@@ -30,11 +28,20 @@ for role in workspace:read workspace:write command:run browser:use network:fetch
 done
 
 if ! "$KCADM" get users -r "$REALM" -q username="$USER_NAME" | grep -q '"id"'; then
-  "$KCADM" create users -r "$REALM" -s id="$USER_ID" -s username="$USER_NAME" -s enabled=true -s emailVerified=true
+  "$KCADM" create users -r "$REALM" -s username="$USER_NAME" -s enabled=true -s emailVerified=true
   "$KCADM" set-password -r "$REALM" --username "$USER_NAME" --new-password "$KEYCLOAK_MCP_PASSWORD"
   "$KCADM" add-roles -r "$REALM" --uusername "$USER_NAME" \
     --rolename workspace:read --rolename workspace:write --rolename command:run \
     --rolename browser:use --rolename network:fetch
+fi
+
+USER_ID=$("$KCADM" get users -r "$REALM" -q username="$USER_NAME" | sed -n 's/.*"id" *: *"\([^"]*\)".*/\1/p' | head -n 1)
+if [ -z "$USER_ID" ]; then
+  echo "Could not resolve the Keycloak subject for $USER_NAME" >&2
+  exit 1
+fi
+if [ -f /config/workspaces.json ]; then
+  sed -i "s/KEYCLOAK_MCP_SUBJECT/$USER_ID/g" /config/workspaces.json
 fi
 
 if ! "$KCADM" get clients -r "$REALM" -q clientId="$CLIENT_ID" | grep -q '"id"'; then
@@ -50,4 +57,4 @@ if ! "$KCADM" get clients -r "$REALM" -q clientId="$CLIENT_ID" | grep -q '"id"';
     -s 'webOrigins=["https://chatgpt.com","https://chat.openai.com"]'
 fi
 
-echo "Keycloak realm '$REALM' is ready for client '$CLIENT_ID'."
+echo "Keycloak realm '$REALM' is ready for client '$CLIENT_ID' and user subject '$USER_ID'."

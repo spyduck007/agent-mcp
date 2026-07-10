@@ -73,7 +73,7 @@ The bootstrap service creates a `chatgpt` login user (or the username set in `KE
    - `browser:use`
    - `network:fetch`
 
-3. The provided `config/workspaces.example.json` already contains the deterministic Keycloak subject for the bootstrap user. Create its project directory:
+3. The Keycloak bootstrap service replaces `KEYCLOAK_MCP_SUBJECT` in `config/workspaces.json` with the actual subject of the configured login user. Create its project directory:
 
 ```bash
 mkdir -p workspaces/chatgpt-project
@@ -88,7 +88,7 @@ docker compose --profile production up -d --build
 docker compose --profile production logs -f
 ```
 
-Caddy obtains and renews the TLS certificate once `MCP_DOMAIN` resolves publicly. Keycloak is available at `https://your-domain.example/auth`; it issues and signs the JWTs validated by the MCP server.
+The production stack binds the MCP server to `127.0.0.1:8081` and Keycloak to `127.0.0.1:8082`. Put an existing HTTPS Nginx reverse proxy in front of them: proxy `/mcp` to `8081` and `/auth/` to `8082` without stripping the `/auth` prefix. Copy the locations from [nginx/mcp.locations.conf.example](nginx/mcp.locations.conf.example) into the existing HTTPS server block, then validate and reload Nginx. Keycloak is then available at `https://your-domain.example/auth`; it issues and signs the JWTs validated by the MCP server.
 
 ### ChatGPT setup
 

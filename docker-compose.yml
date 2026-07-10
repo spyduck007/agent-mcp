@@ -20,22 +20,8 @@ services:
       - ./snapshots:/snapshots
     expose:
       - "8080"
-
-  caddy:
-    image: caddy:2.10-alpine
-    restart: unless-stopped
-    profiles: ["production"]
-    depends_on:
-      - mcp-server
-    environment:
-      MCP_DOMAIN: ${MCP_DOMAIN:?Set the public DNS name, e.g. mcp.example.com}
     ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
+      - "127.0.0.1:8081:8080"
 
   postgres:
     image: postgres:16-alpine
@@ -71,6 +57,8 @@ services:
     command: start
     expose:
       - "8080"
+    ports:
+      - "127.0.0.1:8082:8080"
 
   keycloak-bootstrap:
     image: quay.io/keycloak/keycloak:26.6.4
@@ -86,9 +74,8 @@ services:
       KEYCLOAK_CHATGPT_CLIENT_SECRET: ${KEYCLOAK_CHATGPT_CLIENT_SECRET:?Set a client secret for ChatGPT}
     volumes:
       - ./scripts/bootstrap-keycloak.sh:/bootstrap/bootstrap-keycloak.sh:ro
+      - ./config:/config
     entrypoint: ["/bin/sh", "/bootstrap/bootstrap-keycloak.sh"]
 
 volumes:
-  caddy_data:
-  caddy_config:
   keycloak_postgres:
