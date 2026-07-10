@@ -1,0 +1,15 @@
+# Local-only development. Never deploy this file to an internet-accessible host.
+services:
+  mcp-server:
+    environment:
+      AUTH_MODE: disabled
+      MCP_HOST: 0.0.0.0
+      WORKSPACE_ROOT: /workspace
+      WORKSPACE_MAP_PATH: /config/workspaces.json
+      SNAPSHOT_ROOT: /snapshots
+    ports:
+      - "127.0.0.1:8081:8080"
+    volumes:
+      - .:/workspace
+      - ./config:/config:ro
+      - ./snapshots:/snapshots

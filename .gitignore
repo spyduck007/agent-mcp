@@ -23,6 +23,10 @@ build/
 
 snapshots/
 screenshots/
+workspaces/
+config/workspaces.json
+config/secrets.json
+.env
 
 .DS_Store
 Thumbs.db

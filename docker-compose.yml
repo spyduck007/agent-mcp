@@ -1,27 +1,85 @@
 services:
   mcp-server:
     build: .
-    container_name: mcp-test
-    user: root
-
-    ports:
-      - "8081:8080"
-
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    group_add:
+      - "${DOCKER_GID:-983}"
     environment:
-      NO_PROXY: "localhost,127.0.0.1,host.docker.internal"
-      no_proxy: "localhost,127.0.0.1,host.docker.internal"
-      HOME: "/host"
-      PLAYWRIGHT_BROWSERS_PATH: "/ms-playwright"
-      GIT_SSH_COMMAND: "ssh -i /root/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
-
+      AUTH_MODE: required
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8080
+      PUBLIC_URL: ${PUBLIC_URL:?Set the public HTTPS MCP URL, e.g. https://mcp.example.com}
+      KEYCLOAK_REALM: agent-mcp
+      OIDC_CLIENT_ID: chatgpt-agent-mcp
+      WORKSPACE_ROOT: /workspaces
+      WORKSPACE_MAP_PATH: /config/workspaces.json
+      SECRET_REFS_PATH: /config/secrets.json
+      SNAPSHOT_ROOT: /snapshots
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
     volumes:
-      - /home/anshagrawal:/host
-      - /home/anshagrawal/.ssh:/root/.ssh:ro
-      - ./app:/app/app
+      - ${WORKSPACES_DIR:-./workspaces}:/workspaces
+      - ./config:/config:ro
       - ./snapshots:/snapshots
       - /var/run/docker.sock:/var/run/docker.sock
+    expose:
+      - "8080"
+    ports:
+      - "127.0.0.1:8081:8080"
 
+  postgres:
+    image: postgres:16-alpine
     restart: unless-stopped
+    profiles: ["production"]
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?Set a database password}
+    volumes:
+      - keycloak_postgres:/var/lib/postgresql/data
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.6.4
+    restart: unless-stopped
+    profiles: ["production"]
+    depends_on:
+      - postgres
+    environment:
+      KC_DB: postgres
+      KC_DB_URL_HOST: postgres
+      KC_DB_URL_DATABASE: keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?Set a database password}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:-mcp-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?Set a Keycloak admin password}
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HTTP_RELATIVE_PATH: /auth
+      KC_HOSTNAME: ${PUBLIC_URL:?Set the public HTTPS MCP URL, e.g. https://mcp.example.com}/auth
+      KC_HOSTNAME_STRICT: "true"
+      KC_HEALTH_ENABLED: "true"
+    command: start
+    expose:
+      - "8080"
+    ports:
+      - "127.0.0.1:8082:8080"
+
+  keycloak-bootstrap:
+    image: quay.io/keycloak/keycloak:26.6.4
+    restart: "no"
+    profiles: ["production"]
+    depends_on:
+      - keycloak
+    environment:
+      KEYCLOAK_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:-mcp-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?Set a Keycloak admin password}
+      KEYCLOAK_MCP_USERNAME: ${KEYCLOAK_MCP_USERNAME:-chatgpt}
+      KEYCLOAK_MCP_PASSWORD: ${KEYCLOAK_MCP_PASSWORD:?Set a password for the ChatGPT login}
+      KEYCLOAK_CHATGPT_CLIENT_SECRET: ${KEYCLOAK_CHATGPT_CLIENT_SECRET:?Set a client secret for ChatGPT}
+    volumes:
+      - ./scripts/bootstrap-keycloak.sh:/bootstrap/bootstrap-keycloak.sh:ro
+      - ./config:/config
+    entrypoint: ["/bin/sh", "/bootstrap/bootstrap-keycloak.sh"]
+
+volumes:
+  keycloak_postgres:
