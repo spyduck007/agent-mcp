@@ -59,7 +59,7 @@ mkdir -p config workspaces snapshots
 cp config/workspaces.example.json config/workspaces.json
 ```
 
-2. Edit `.env` with your public domain and five long random passwords. Keycloak is self-hosted in this Compose stack; no third-party OAuth account or endpoints are needed. Generate passwords with:
+2. Edit `.env` with your public domain and four long random secrets. Keycloak is self-hosted in this Compose stack; no third-party OAuth account or endpoints are needed. Generate secrets with:
 
 ```bash
 openssl rand -base64 32
@@ -100,8 +100,8 @@ In ChatGPT Developer mode, add a remote streaming-HTTP MCP app with:
 | Authentication | OAuth |
 | Client registration | Static |
 | Client ID | `chatgpt-agent-mcp` |
-| Client secret | Leave empty |
-| Token endpoint auth method | `none` |
+| Client secret | Value of `KEYCLOAK_CHATGPT_CLIENT_SECRET` from `.env` |
+| Token endpoint auth method | `client_secret_post` |
 | Authorization URL | `https://your-domain.example/auth/realms/agent-mcp/protocol/openid-connect/auth` |
 | Token URL | `https://your-domain.example/auth/realms/agent-mcp/protocol/openid-connect/token` |
 | Scopes | `openid profile` |

@@ -6,6 +6,7 @@ KCADM=/opt/keycloak/bin/kcadm.sh
 SERVER=http://keycloak:8080/auth
 REALM=agent-mcp
 CLIENT_ID=chatgpt-agent-mcp
+CLIENT_SECRET=${KEYCLOAK_CHATGPT_CLIENT_SECRET:?KEYCLOAK_CHATGPT_CLIENT_SECRET is required}
 USER_NAME=${KEYCLOAK_MCP_USERNAME:?KEYCLOAK_MCP_USERNAME is required}
 # A deterministic UUID makes the Keycloak `sub` claim known before first login.
 USER_ID=00000000-0000-4000-8000-000000000001
@@ -40,7 +41,9 @@ if ! "$KCADM" get clients -r "$REALM" -q clientId="$CLIENT_ID" | grep -q '"id"';
   "$KCADM" create clients -r "$REALM" \
     -s clientId="$CLIENT_ID" \
     -s enabled=true \
-    -s publicClient=true \
+    -s publicClient=false \
+    -s clientAuthenticatorType=client-secret \
+    -s secret="$CLIENT_SECRET" \
     -s standardFlowEnabled=true \
     -s directAccessGrantsEnabled=false \
     -s 'redirectUris=["https://chatgpt.com/*","https://chat.openai.com/*"]' \

@@ -83,6 +83,7 @@ services:
       KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?Set a Keycloak admin password}
       KEYCLOAK_MCP_USERNAME: ${KEYCLOAK_MCP_USERNAME:-chatgpt}
       KEYCLOAK_MCP_PASSWORD: ${KEYCLOAK_MCP_PASSWORD:?Set a password for the ChatGPT login}
+      KEYCLOAK_CHATGPT_CLIENT_SECRET: ${KEYCLOAK_CHATGPT_CLIENT_SECRET:?Set a client secret for ChatGPT}
     volumes:
       - ./scripts/bootstrap-keycloak.sh:/bootstrap/bootstrap-keycloak.sh:ro
     entrypoint: ["/bin/sh", "/bootstrap/bootstrap-keycloak.sh"]
