@@ -83,6 +83,51 @@ class SecurityBoundaryTests(unittest.TestCase):
         readiness = json.loads(self.server.self_improvement_readiness())
         self.assertFalse(readiness["is_isolated_self_workspace"])
 
+    def test_close_project_rejects_last_project_without_mutating_state(self) -> None:
+        state = self.server.session_state()
+        original_projects = dict(state.projects)
+        original_name = state.current_project_name
+        original_path = state.current_project
+
+        with self.assertRaisesRegex(ValueError, "Cannot close the last workspace project"):
+            self.server.close_project(original_name)
+
+        self.assertEqual(state.projects, original_projects)
+        self.assertEqual(state.current_project_name, original_name)
+        self.assertEqual(state.current_project, original_path)
+
+    def test_read_symlink_returns_workspace_target(self) -> None:
+        target = self.workspace / "target.txt"
+        target.write_text("target", encoding="utf-8")
+        (self.workspace / "link.txt").symlink_to(target)
+
+        result = json.loads(self.server.read_symlink("link.txt"))
+
+        self.assertEqual(Path(result["path"]), self.workspace / "link.txt")
+        self.assertEqual(Path(result["resolved_target"]), target)
+        self.assertEqual(result["link_target"], str(target))
+
+    def test_read_symlink_rejects_target_outside_workspace(self) -> None:
+        outside = self.workspace.parent / "outside.txt"
+        outside.write_text("outside", encoding="utf-8")
+        (self.workspace / "outside-link.txt").symlink_to(outside)
+
+        with self.assertRaisesRegex(PermissionError, "target is outside"):
+            self.server.read_symlink("outside-link.txt")
+
+    def test_project_checkpoint_creates_checkpoint_directory(self) -> None:
+        result = json.loads(self.server.project_checkpoint(
+            "Regression checkpoint",
+            ["Continue testing"],
+            {"tests": "pending"},
+        ))
+
+        checkpoint = self.snapshots / "memory"
+        checkpoint_files = list(checkpoint.rglob(f"{result['id']}.json"))
+        self.assertEqual(len(checkpoint_files), 1)
+        stored = json.loads(checkpoint_files[0].read_text(encoding="utf-8"))
+        self.assertEqual(stored["summary"], "Regression checkpoint")
+
 
 if __name__ == "__main__":
     unittest.main()
