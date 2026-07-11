@@ -37,29 +37,30 @@ class AuthorizationContractTests(unittest.TestCase):
         self.tempdir.cleanup()
 
     def identity_with(self, scopes: set[str]):
-        return mock.patch.object(self.server, "_identity", return_value=("local-dev", scopes))
+        return mock.patch.object(self.server._core, "_identity", return_value=("local-dev", scopes))
 
     def test_every_registered_tool_has_contract_and_calls_gate_first(self) -> None:
         module_file = self.server.__file__
         if module_file is None:
             self.fail("app.server has no source file")
-        source = Path(module_file).read_text(encoding="utf-8")
-        tree = ast.parse(source)
+        tools_dir = Path(module_file).with_name("tools")
         registered: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
 
-        for node in tree.body:
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            for decorator in node.decorator_list:
-                target = decorator.func if isinstance(decorator, ast.Call) else decorator
-                if (
-                    isinstance(target, ast.Attribute)
-                    and isinstance(target.value, ast.Name)
-                    and target.value.id == "mcp"
-                    and target.attr == "tool"
-                ):
-                    registered[node.name] = node
-                    break
+        for tool_file in tools_dir.glob("*.py"):
+            tree = ast.parse(tool_file.read_text(encoding="utf-8"))
+            for node in tree.body:
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for decorator in node.decorator_list:
+                    target = decorator.func if isinstance(decorator, ast.Call) else decorator
+                    if (
+                        isinstance(target, ast.Attribute)
+                        and isinstance(target.value, ast.Name)
+                        and target.value.id == "mcp"
+                        and target.attr == "tool"
+                    ):
+                        registered[node.name] = node
+                        break
 
         self.assertEqual(set(registered), set(self.server.TOOL_SCOPE_REQUIREMENTS))
 
@@ -117,7 +118,7 @@ class AuthorizationContractTests(unittest.TestCase):
     def test_deployment_denial_happens_before_docker(self) -> None:
         with (
             self.identity_with({"workspace:read", "workspace:write"}),
-            mock.patch.object(self.server, "_run_argv") as runner,
+            mock.patch.object(self.server._core, "_run_argv") as runner,
         ):
             with self.assertRaisesRegex(PermissionError, "deploy:run"):
                 self.server.deployment_preflight()
@@ -138,7 +139,7 @@ class AuthorizationContractTests(unittest.TestCase):
 
     def test_installation_requires_admin_scope_before_shell(self) -> None:
         scopes = {"command:run", "workspace:read", "workspace:write"}
-        with self.identity_with(scopes), mock.patch.object(self.server, "shell") as shell:
+        with self.identity_with(scopes), mock.patch.object(self.server._core, "shell") as shell:
             with self.assertRaisesRegex(PermissionError, "admin:install"):
                 self.server.install_project_dependencies("pip")
         shell.assert_not_called()
