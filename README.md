@@ -28,12 +28,31 @@ The server is implemented with `FastMCP` and runs over streamable HTTP at `/mcp`
 .
 ├── app/
 │   ├── __init__.py
-│   └── server.py
+│   ├── core.py                 # authentication, shared state, paths, and helpers
+│   ├── server.py               # compatibility facade and MCP entry point
+│   └── tools/                  # capability-focused MCP tool modules
+│       ├── browser.py
+│       ├── commands.py
+│       ├── compose.py
+│       ├── database.py
+│       ├── deployment.py
+│       ├── files.py
+│       ├── git.py
+│       ├── github.py
+│       ├── network.py
+│       ├── packages.py
+│       ├── processes.py
+│       ├── project.py
+│       ├── snapshots.py
+│       └── workspaces.py
+├── tests/
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
 └── README.md
 ```
+
+`app.server` preserves the original public import surface, while each tool implementation lives in the module matching its capability. Shared authorization, session state, path validation, browser helpers, process helpers, and configuration remain centralized in `app.core` so every tool group uses the same security boundary.
 
 ## Requirements
 
