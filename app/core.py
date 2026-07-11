@@ -163,6 +163,7 @@ class ProcessRecord:
     output: deque[str] = field(default_factory=lambda: deque(maxlen=PROCESS_LOG_LIMIT))
     total_lines: int = 0
     reader_done: bool = False
+    redactions: tuple[str, ...] = ()
 
 
 @dataclass
@@ -500,10 +501,17 @@ def _process_status(record: ProcessRecord) -> str:
     return "running" if status is None else f"exited {status}"
 
 
+def _redact_text(text: str, values: Iterable[str]) -> str:
+    redacted = text
+    for value in sorted({item for item in values if item}, key=len, reverse=True):
+        redacted = redacted.replace(value, "[REDACTED]")
+    return redacted
+
+
 def _record_process_line(record: ProcessRecord, line: str) -> None:
     with PROCESS_LOCK:
         record.total_lines += 1
-        record.output.append(line.rstrip("\n"))
+        record.output.append(_redact_text(line.rstrip("\n"), record.redactions))
 
 
 def _read_process_output(process_id: str, record: ProcessRecord) -> None:

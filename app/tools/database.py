@@ -3,6 +3,7 @@
 from app.core import (
     MAX_OUTPUT,
     _format_browser_result,
+    _redact_text,
     _secret_values,
     authorize_tool,
     mcp,
@@ -20,6 +21,7 @@ def database_query(
     authorize_tool("database_query")
     require_scope("database:use")
     timeout = min(max(timeout_seconds, 1), 120)
+    redactions: list[str] = []
     if engine == "sqlite":
         if not database:
             raise ValueError("SQLite requires a workspace database path")
@@ -29,6 +31,7 @@ def database_query(
         if not secret_ref:
             raise ValueError("Postgres requires a secret_ref containing its connection URL")
         connection = _secret_values([secret_ref])[secret_ref]
+        redactions.append(connection)
         result = subprocess.run(
             ["psql", connection, "--no-psqlrc", "--tuples-only", "--no-align", "-c", query],
             text=True,
@@ -41,8 +44,8 @@ def database_query(
         {
             "engine": engine,
             "exit_code": result.returncode,
-            "stdout": result.stdout[:MAX_OUTPUT],
-            "stderr": result.stderr[:MAX_OUTPUT],
+            "stdout": _redact_text(result.stdout, redactions)[:MAX_OUTPUT],
+            "stderr": _redact_text(result.stderr, redactions)[:MAX_OUTPUT],
         }
     )
 

@@ -5,6 +5,7 @@ from app.core import (
     MAX_OUTPUT,
     _command_environment,
     _format_browser_result,
+    _redact_text,
     authorize_tool,
     mcp,
     require_scope,
@@ -47,11 +48,13 @@ def run_command_advanced(
     timeout = min(max(timeout_seconds, 1), 300)
     state = session_state()
     state.command_history.append(f"[{state.current_project_name}] {working_dir}$ {shlex.join(argv)}")
+    command_env = _command_environment(environment, secret_refs)
+    redactions = [command_env[name] for name in secret_refs or [] if name in command_env]
     try:
         result = subprocess.run(
             argv,
             cwd=working_dir,
-            env=_command_environment(environment, secret_refs),
+            env=command_env,
             input=stdin,
             text=True,
             capture_output=True,
@@ -61,12 +64,14 @@ def run_command_advanced(
     except subprocess.TimeoutExpired as exc:
         result = None
         timed_out = True
-        stdout = exc.stdout or ""
-        stderr = exc.stderr or ""
+        stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
     else:
         stdout = result.stdout
         stderr = result.stderr
 
+    stdout = _redact_text(stdout, redactions)
+    stderr = _redact_text(stderr, redactions)
     combined = f"stdout:\n{stdout}\n\nstderr:\n{stderr}"
     output_path = None
     if output_file:

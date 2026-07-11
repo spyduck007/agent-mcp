@@ -78,14 +78,15 @@ def deployment_preflight(cwd: str = ".") -> str:
     if not ((root / "docker-compose.yml").exists() or (root / "compose.yml").exists()):
         raise FileNotFoundError("No docker-compose.yml or compose.yml in the selected project")
     config = _run_argv(["docker", "compose", "config", "--quiet"], root, 120)
-    status = _run_argv(["docker", "compose", "ps", "--all"], root, 60)
-    snapshot = create_snapshot(f"predeploy-{int(time.time())}")
+    ready = config["exit_code"] == 0
+    status = _run_argv(["docker", "compose", "ps", "--all"], root, 60) if ready else None
+    snapshot = create_snapshot(f"predeploy-{int(time.time())}") if ready else None
     payload = {
         "project": str(root),
         "config": config,
         "status": status,
         "snapshot": snapshot,
-        "ready": config["exit_code"] == 0,
+        "ready": ready,
     }
     _audit("deployment_preflight", {"project": str(root), "ready": payload["ready"]})
     return _json_result(payload)
