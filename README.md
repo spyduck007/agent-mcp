@@ -15,6 +15,8 @@ The server is implemented with `FastMCP` and runs over streamable HTTP at `/mcp`
 - Run browser automation with Playwright Chromium.
 - Capture DOM, accessibility, form, network, storage, console, and error snapshots.
 - Keep persistent browser sessions across multiple MCP calls.
+- Track process and browser activity with configurable per-user limits and idle cleanup.
+- Expose a credential-free `/health` endpoint for Docker readiness checks.
 - Create, restore, and list local project snapshots.
 - Install Debian, Python, and Node packages in the running container.
 - Report grounded project context, stack markers, verification commands, and durable project memory.
@@ -238,6 +240,25 @@ The production MCP service mounts the Docker socket so authenticated deployment 
 
 Important production environment values are in `.env`: `PUBLIC_URL`, `WORKSPACES_DIR`, and the `KEYCLOAK_*` passwords. The server derives the issuer and JWKS endpoint from the public URL and refuses to start in production mode without a valid HTTPS URL.
 
+### Resource lifecycle configuration
+
+Tracked background processes and persistent browser sessions use generous configurable limits so long coding, debugging, and security workflows remain available without allowing abandoned resources to accumulate forever:
+
+| Variable | Default | Meaning |
+| --- | ---: | --- |
+| `MAX_PROCESSES_PER_USER` | `32` | Maximum tracked processes per authenticated identity |
+| `MAX_BROWSER_SESSIONS_PER_USER` | `12` | Maximum persistent browser sessions per identity |
+| `PROCESS_IDLE_TTL_SECONDS` | `14400` | Stop a running process after four hours without output or interaction |
+| `BROWSER_IDLE_TTL_SECONDS` | `7200` | Close a browser session after two hours without interaction |
+| `FINISHED_PROCESS_RETENTION_SECONDS` | `3600` | Keep exited-process output available for one hour |
+| `RESOURCE_CLEANUP_INTERVAL_SECONDS` | `60` | Frequency of automatic cleanup checks |
+
+Set any limit or expiration value to `0` to disable that behavior. Resource limits do not inspect or restrict command contents, browser destinations, programming languages, debuggers, compilers, or security tooling.
+
+Use `resource_status` to inspect current usage and idle ages. Use `resource_cleanup` for eligible stale resources, or `resource_cleanup(force=true)` to explicitly close all resources owned by the current identity. On container shutdown, the MCP lifespan gracefully terminates tracked process groups and closes browser resources.
+
+Docker checks `GET /health`, which returns only bounded service and resource counts—never commands, file names, browser URLs, credentials, or secret values.
+
 ## Local Development
 
 Create and activate a virtual environment:
@@ -271,7 +292,7 @@ python -m pytest -q
 docker compose --env-file .mcp-compose-validation.env config --quiet
 ```
 
-Pytest enforces the current 30% coverage floor. `project_verify` reports each requested suite as `passed`, `failed`, or `not_configured`; explicitly requesting an unconfigured suite makes the overall verification fail instead of silently passing.
+Pytest enforces the current 45% coverage floor. `project_verify` reports each requested suite as `passed`, `failed`, or `not_configured`; explicitly requesting an unconfigured suite makes the overall verification fail instead of silently passing.
 
 By default, the server binds to `0.0.0.0:8080` and serves MCP traffic at `/mcp`.
 

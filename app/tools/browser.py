@@ -2,6 +2,7 @@
 
 from app.core import (
     BROWSER_LOG_LIMIT,
+    MAX_BROWSER_SESSIONS_PER_USER,
     Any,
     BrowserSessionRecord,
     _append_browser_events,
@@ -474,6 +475,11 @@ async def browser_session_open(
     state = session_state()
     if session_id in state.browser_sessions:
         raise ValueError(f"Browser session already exists: {session_id}")
+    if MAX_BROWSER_SESSIONS_PER_USER > 0 and len(state.browser_sessions) >= MAX_BROWSER_SESSIONS_PER_USER:
+        raise RuntimeError(
+            f"Browser-session limit reached ({MAX_BROWSER_SESSIONS_PER_USER}); "
+            "raise MAX_BROWSER_SESSIONS_PER_USER or set it to 0"
+        )
 
     playwright = await async_playwright().start()
     browser, context, page = await _new_browser_page(playwright, width, height)

@@ -30,6 +30,7 @@ _TOOL_MODULE_NAMES = [
     "app.tools.packages",
     "app.tools.processes",
     "app.tools.project",
+    "app.tools.resources",
     "app.tools.snapshots",
     "app.tools.workspaces",
 ]

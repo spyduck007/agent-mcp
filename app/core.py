@@ -1,4 +1,5 @@
 # ruff: noqa: F401
+import asyncio
 import base64
 import difflib
 import hashlib
@@ -17,6 +18,7 @@ import urllib.request
 import uuid
 from collections import deque
 from collections.abc import Iterable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,6 +31,8 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import AnyHttpUrl
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 try:
     import jwt
@@ -37,6 +41,13 @@ except ImportError:  # pragma: no cover - clearer startup error below
 
 
 READ_ONLY_ANNOTATIONS = ToolAnnotations(readOnlyHint=True)
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(int(os.getenv(name, str(default))), 0)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a non-negative integer") from exc
 
 
 AUTH_MODE = os.getenv("AUTH_MODE", "required").lower()
@@ -130,6 +141,24 @@ def _auth_settings() -> tuple[AuthSettings | None, TokenVerifier | None]:
 
 AUTH_SETTINGS, TOKEN_VERIFIER = _auth_settings()
 
+RESOURCE_CLEANUP_LAST_RUN: float | None = None
+RESOURCE_CLEANUP_LAST_ERROR: str | None = None
+
+
+@asynccontextmanager
+async def _mcp_lifespan(_server):
+    cleanup_task = asyncio.create_task(_resource_cleanup_loop(), name="resource-cleanup")
+    try:
+        yield {}
+    finally:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
+        await _cleanup_all_resources(force=True)
+
+
 mcp = FastMCP(
     "coding-agent-mcp",
     instructions=(
@@ -142,6 +171,7 @@ mcp = FastMCP(
     streamable_http_path="/mcp",
     auth=AUTH_SETTINGS,
     token_verifier=TOKEN_VERIFIER,
+    lifespan=_mcp_lifespan,
 )
 
 SNAPSHOT_ROOT = Path(os.getenv("SNAPSHOT_ROOT", "/snapshots")).resolve()
@@ -149,6 +179,12 @@ AUDIT_ROOT = Path(os.getenv("AUDIT_ROOT", "/snapshots/audit")).resolve()
 MEMORY_ROOT = Path(os.getenv("MEMORY_ROOT", "/snapshots/memory")).resolve()
 AGENT_POLICY_PATH = Path(os.getenv("AGENT_POLICY_PATH", "/config/agent-policy.md"))
 SELF_IMPROVEMENT_WORKSPACE = os.getenv("SELF_IMPROVEMENT_WORKSPACE", "agent-mcp")
+MAX_PROCESSES_PER_USER = _env_int("MAX_PROCESSES_PER_USER", 32)
+MAX_BROWSER_SESSIONS_PER_USER = _env_int("MAX_BROWSER_SESSIONS_PER_USER", 12)
+PROCESS_IDLE_TTL_SECONDS = _env_int("PROCESS_IDLE_TTL_SECONDS", 14400)
+BROWSER_IDLE_TTL_SECONDS = _env_int("BROWSER_IDLE_TTL_SECONDS", 7200)
+FINISHED_PROCESS_RETENTION_SECONDS = _env_int("FINISHED_PROCESS_RETENTION_SECONDS", 3600)
+RESOURCE_CLEANUP_INTERVAL_SECONDS = _env_int("RESOURCE_CLEANUP_INTERVAL_SECONDS", 60)
 
 PROCESS_LOG_LIMIT = 5000
 BROWSER_LOG_LIMIT = 500
@@ -164,6 +200,8 @@ class ProcessRecord:
     total_lines: int = 0
     reader_done: bool = False
     redactions: tuple[str, ...] = ()
+    last_activity_at: float = field(default_factory=time.time)
+    exited_at: float | None = None
 
 
 @dataclass
@@ -173,6 +211,7 @@ class BrowserSessionRecord:
     context: Any
     page: Any
     created_at: float
+    last_activity_at: float = field(default_factory=time.time)
     console_messages: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=BROWSER_LOG_LIMIT))
     page_errors: deque[str] = field(default_factory=lambda: deque(maxlen=BROWSER_LOG_LIMIT))
     failed_requests: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=BROWSER_LOG_LIMIT))
@@ -369,6 +408,8 @@ TOOL_SCOPE_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "wait_for_process_output": ("command:run",),
     "write_binary_file": ("workspace:read", "workspace:write"),
     "write_file": ("workspace:read", "workspace:write"),
+    "resource_status": ("workspace:read",),
+    "resource_cleanup": ("workspace:read", "command:run", "browser:use"),
 }
 
 
@@ -423,22 +464,29 @@ def _json_result(data: Any) -> str:
     return json.dumps(data, indent=2, sort_keys=True, default=str)
 
 
-def _audit(event: str, details: dict[str, Any]) -> None:
-    """Write a bounded, credential-free audit record for high-level agent actions."""
+def _audit_state(state: UserSessionState, event: str, details: dict[str, Any]) -> None:
+    """Write a bounded, credential-free audit record for a known session state."""
     try:
         entry = {
             "at": datetime.now(UTC).isoformat(),
-            "subject": session_state().subject,
-            "project": session_state().current_project_name,
+            "subject": state.subject,
+            "project": state.current_project_name,
             "event": event,
             "details": details,
         }
-        target = _identity_storage_root(AUDIT_ROOT) / "events.jsonl"
-        with target.open("a", encoding="utf-8") as handle:
+        digest = hashlib.sha256(state.subject.encode("utf-8")).hexdigest()[:24]
+        target_root = AUDIT_ROOT / digest
+        target_root.mkdir(parents=True, exist_ok=True)
+        with (target_root / "events.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, sort_keys=True, default=str) + "\n")
     except Exception:
-        # An audit-volume failure must never turn a safe read operation into an outage.
+        # An audit-volume failure must never turn a safe operation into an outage.
         pass
+
+
+def _audit(event: str, details: dict[str, Any]) -> None:
+    """Write a bounded, credential-free audit record for the current identity."""
+    _audit_state(session_state(), event, details)
 
 
 def set_current_project(name: str, path: Path) -> None:
@@ -498,7 +546,17 @@ def shell(command: str, cwd: str = ".", timeout_seconds: int = DEFAULT_TIMEOUT_S
 
 def _process_status(record: ProcessRecord) -> str:
     status = record.process.poll()
+    if status is not None and record.exited_at is None:
+        record.exited_at = time.time()
     return "running" if status is None else f"exited {status}"
+
+
+def _touch_process(record: ProcessRecord) -> None:
+    record.last_activity_at = time.time()
+
+
+def _touch_browser(record: BrowserSessionRecord) -> None:
+    record.last_activity_at = time.time()
 
 
 def _redact_text(text: str, values: Iterable[str]) -> str:
@@ -511,6 +569,7 @@ def _redact_text(text: str, values: Iterable[str]) -> str:
 def _record_process_line(record: ProcessRecord, line: str) -> None:
     with PROCESS_LOCK:
         record.total_lines += 1
+        record.last_activity_at = time.time()
         record.output.append(_redact_text(line.rstrip("\n"), record.redactions))
 
 
@@ -526,6 +585,8 @@ def _read_process_output(process_id: str, record: ProcessRecord) -> None:
     finally:
         with PROCESS_LOCK:
             record.reader_done = True
+            if record.exited_at is None:
+                record.exited_at = time.time()
 
 
 def _load_playwright():
@@ -1056,7 +1117,151 @@ def _get_browser_session(session_id: str) -> BrowserSessionRecord:
     record = session_state().browser_sessions.get(session_id)
     if record is None:
         raise ValueError(f"Unknown browser session: {session_id}")
+    _touch_browser(record)
     return record
+
+
+def _resource_counts() -> dict[str, int]:
+    with SESSION_LOCK:
+        states = list(SESSIONS.values())
+    processes = sum(len(state.processes) for state in states)
+    browsers = sum(len(state.browser_sessions) for state in states)
+    running = sum(1 for state in states for record in state.processes.values() if record.process.poll() is None)
+    return {"sessions": len(states), "processes": processes, "running_processes": running, "browser_sessions": browsers}
+
+
+def _stop_process_record(record: ProcessRecord) -> None:
+    if record.process.poll() is not None:
+        if record.exited_at is None:
+            record.exited_at = time.time()
+        return
+    try:
+        os.killpg(record.process.pid, 15)
+        record.process.wait(timeout=5)
+    except (ProcessLookupError, subprocess.TimeoutExpired):
+        try:
+            os.killpg(record.process.pid, 9)
+            record.process.wait(timeout=5)
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            pass
+    finally:
+        record.exited_at = time.time()
+
+
+async def _close_browser_record(record: BrowserSessionRecord) -> list[str]:
+    errors: list[str] = []
+    for cleanup in (record.context.close, record.browser.close, record.playwright.stop):
+        try:
+            await cleanup()
+        except Exception as exc:
+            errors.append(type(exc).__name__)
+    return errors
+
+
+async def _cleanup_state_resources(
+    state: UserSessionState, *, now: float | None = None, force: bool = False
+) -> dict[str, Any]:
+    current = time.time() if now is None else now
+    removed_processes: list[str] = []
+    stopped_processes: list[str] = []
+    closed_browsers: list[str] = []
+    cleanup_errors: list[dict[str, Any]] = []
+
+    with PROCESS_LOCK:
+        process_items = list(state.processes.items())
+    for process_id, record in process_items:
+        status = record.process.poll()
+        if status is None:
+            stale = PROCESS_IDLE_TTL_SECONDS > 0 and current - record.last_activity_at >= PROCESS_IDLE_TTL_SECONDS
+            if force or stale:
+                _stop_process_record(record)
+                stopped_processes.append(process_id)
+                with PROCESS_LOCK:
+                    state.processes.pop(process_id, None)
+                removed_processes.append(process_id)
+        else:
+            if record.exited_at is None:
+                record.exited_at = current
+            expired = (
+                FINISHED_PROCESS_RETENTION_SECONDS > 0
+                and current - record.exited_at >= FINISHED_PROCESS_RETENTION_SECONDS
+            )
+            if force or expired:
+                with PROCESS_LOCK:
+                    state.processes.pop(process_id, None)
+                removed_processes.append(process_id)
+
+    browser_items = list(state.browser_sessions.items())
+    for session_id, record in browser_items:
+        stale = BROWSER_IDLE_TTL_SECONDS > 0 and current - record.last_activity_at >= BROWSER_IDLE_TTL_SECONDS
+        if force or stale:
+            state.browser_sessions.pop(session_id, None)
+            errors = await _close_browser_record(record)
+            if errors:
+                cleanup_errors.append({"type": "browser", "session_id": session_id, "errors": errors})
+            closed_browsers.append(session_id)
+
+    result = {
+        "subject": state.subject,
+        "removed_processes": removed_processes,
+        "stopped_processes": stopped_processes,
+        "closed_browser_sessions": closed_browsers,
+        "errors": cleanup_errors,
+    }
+    if removed_processes or closed_browsers or cleanup_errors:
+        _audit_state(
+            state,
+            "resource_cleanup",
+            {
+                "force": force,
+                "removed_process_count": len(removed_processes),
+                "stopped_process_count": len(stopped_processes),
+                "closed_browser_count": len(closed_browsers),
+                "error_count": len(cleanup_errors),
+            },
+        )
+    return result
+
+
+async def _cleanup_all_resources(*, force: bool = False) -> list[dict[str, Any]]:
+    global RESOURCE_CLEANUP_LAST_ERROR, RESOURCE_CLEANUP_LAST_RUN
+    with SESSION_LOCK:
+        states = list(SESSIONS.values())
+    results: list[dict[str, Any]] = []
+    try:
+        for state in states:
+            results.append(await _cleanup_state_resources(state, force=force))
+        RESOURCE_CLEANUP_LAST_ERROR = None
+    except Exception as exc:
+        RESOURCE_CLEANUP_LAST_ERROR = type(exc).__name__
+    finally:
+        RESOURCE_CLEANUP_LAST_RUN = time.time()
+    return results
+
+
+async def _resource_cleanup_loop() -> None:
+    while True:
+        interval = RESOURCE_CLEANUP_INTERVAL_SECONDS
+        if interval <= 0:
+            await asyncio.sleep(3600)
+            continue
+        await asyncio.sleep(interval)
+        await _cleanup_all_resources()
+
+
+@mcp.custom_route("/health", methods=["GET"], include_in_schema=False)
+async def health_check(_request: Request) -> JSONResponse:
+    counts = _resource_counts()
+    return JSONResponse(
+        {
+            "status": "ok",
+            "workspace_root_available": WORKSPACE_ROOT.exists(),
+            "cleanup_worker_enabled": RESOURCE_CLEANUP_INTERVAL_SECONDS > 0,
+            "cleanup_last_run_unix": RESOURCE_CLEANUP_LAST_RUN,
+            "cleanup_last_error": RESOURCE_CLEANUP_LAST_ERROR,
+            **counts,
+        }
+    )
 
 
 def _run_argv(argv: list[str], cwd: Path, timeout_seconds: int = 300) -> dict[str, Any]:

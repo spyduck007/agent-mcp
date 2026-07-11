@@ -2,6 +2,7 @@
 
 from app.core import (
     MAX_OUTPUT,
+    MAX_PROCESSES_PER_USER,
     PROCESS_LOCK,
     PROCESS_LOG_LIMIT,
     READ_ONLY_ANNOTATIONS,
@@ -10,6 +11,7 @@ from app.core import (
     _format_browser_result,
     _process_status,
     _read_process_output,
+    _touch_process,
     authorize_tool,
     mcp,
     os,
@@ -38,6 +40,11 @@ def start_process(command: str, cwd: str = ".", name: str | None = None) -> str:
     state = session_state()
     if process_id in state.processes:
         raise ValueError(f"Process id already exists: {process_id}")
+    running_processes = sum(1 for record in state.processes.values() if record.process.poll() is None)
+    if MAX_PROCESSES_PER_USER > 0 and running_processes >= MAX_PROCESSES_PER_USER:
+        raise RuntimeError(
+            f"Process limit reached ({MAX_PROCESSES_PER_USER}); raise MAX_PROCESSES_PER_USER or set it to 0"
+        )
 
     env = os.environ.copy()
     env["HOME"] = str(state.current_project)
@@ -122,6 +129,7 @@ def get_process_output(process_id: str, max_lines: int = 300, since_line: int | 
         if record is None:
             raise ValueError("Unknown process_id")
 
+        _touch_process(record)
         total_lines = record.total_lines
         buffered_lines = list(record.output)
 
@@ -169,6 +177,7 @@ def wait_for_process_output(
             if record is None:
                 raise ValueError("Unknown process_id")
 
+            _touch_process(record)
             total_lines = record.total_lines
             buffered_lines = list(record.output)
 
@@ -217,6 +226,7 @@ def stop_process(process_id: str, kill: bool = False) -> str:
     if record is None:
         raise ValueError("Unknown process_id")
 
+    _touch_process(record)
     if record.process.poll() is None:
         if kill:
             os.killpg(record.process.pid, 9)
@@ -269,6 +279,11 @@ def start_process_advanced(
     process_id = (name or str(uuid.uuid4())[:8]).strip() or str(uuid.uuid4())[:8]
     if process_id in state.processes:
         raise ValueError(f"Process id already exists: {process_id}")
+    running_processes = sum(1 for record in state.processes.values() if record.process.poll() is None)
+    if MAX_PROCESSES_PER_USER > 0 and running_processes >= MAX_PROCESSES_PER_USER:
+        raise RuntimeError(
+            f"Process limit reached ({MAX_PROCESSES_PER_USER}); raise MAX_PROCESSES_PER_USER or set it to 0"
+        )
     working_dir = resolve_path(cwd)
     command_env = _command_environment(environment, secret_refs)
     redactions = tuple(command_env[name] for name in secret_refs or [] if name in command_env)
@@ -322,6 +337,7 @@ def send_process_input(process_id: str, data: str, append_newline: bool = True) 
         raise ValueError("Process was not started with allow_stdin=true")
     if record.process.poll() is not None:
         raise ValueError("Process has already exited")
+    _touch_process(record)
     record.process.stdin.write(data + ("\n" if append_newline else ""))
     record.process.stdin.flush()
     return _format_browser_result(
@@ -341,6 +357,7 @@ def signal_process(process_id: str, signal_name: str = "TERM") -> str:
     signal_number = signals.get(signal_name.upper())
     if signal_number is None:
         raise ValueError(f"Unsupported signal: {signal_name}")
+    _touch_process(record)
     if record.process.poll() is None:
         os.killpg(record.process.pid, signal_number)
     return _format_browser_result(
