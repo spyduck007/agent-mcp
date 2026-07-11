@@ -255,7 +255,7 @@ Tracked background processes and persistent browser sessions use generous config
 
 Set any limit or expiration value to `0` to disable that behavior. Resource limits do not inspect or restrict command contents, browser destinations, programming languages, debuggers, compilers, or security tooling.
 
-Use `resource_status` to inspect current usage and idle ages. Use `resource_cleanup` for eligible stale resources, or `resource_cleanup(force=true)` to explicitly close all resources owned by the current identity. On container shutdown, the MCP lifespan gracefully terminates tracked process groups and closes browser resources.
+Cleanup runs automatically according to the configured limits and TTLs. On container shutdown, the MCP lifespan gracefully terminates tracked process groups and closes browser resources.
 
 Docker checks `GET /health`, which returns only bounded service and resource counts—never commands, file names, browser URLs, credentials, or secret values.
 

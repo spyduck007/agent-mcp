@@ -408,8 +408,6 @@ TOOL_SCOPE_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "wait_for_process_output": ("command:run",),
     "write_binary_file": ("workspace:read", "workspace:write"),
     "write_file": ("workspace:read", "workspace:write"),
-    "resource_status": ("workspace:read",),
-    "resource_cleanup": ("workspace:read", "command:run", "browser:use"),
 }
 
 

@@ -80,22 +80,6 @@ class ResourceLifecycleTests(unittest.TestCase):
             exited_at=exited_at,
         )
 
-    def test_resource_status_reports_limits_without_command_contents(self) -> None:
-        process = mock.Mock(pid=123)
-        process.poll.return_value = None
-        record = self.process_record(process, last_activity_at=time.time() - 5)
-        record.output.extend(["one", "two"])
-        record.total_lines = 2
-        state = self.server.session_state()
-        state.processes["proc"] = record
-        state.browser_sessions["browser"] = self.browser_record()
-
-        result = json.loads(self.server.resource_status())
-        self.assertEqual(result["counts"], {"processes": 1, "browser_sessions": 1})
-        self.assertEqual(result["limits"]["max_processes_per_user"], 32)
-        self.assertNotIn("command", result["processes"][0])
-        self.assertEqual(result["processes"][0]["retained_output_characters"], 6)
-
     def test_eligible_cleanup_removes_finished_and_idle_resources(self) -> None:
         now = 10000.0
         running = mock.Mock(pid=101)
@@ -162,7 +146,7 @@ class ResourceLifecycleTests(unittest.TestCase):
         state.browser_sessions["browser"] = browser
 
         with mock.patch("app.core.os.killpg"):
-            result = json.loads(asyncio.run(self.server.resource_cleanup(force=True)))
+            result = asyncio.run(self.server._core._cleanup_state_resources(state, force=True))
         self.assertEqual(result["stopped_processes"], ["running"])
         self.assertEqual(result["closed_browser_sessions"], ["browser"])
         self.assertEqual(result["errors"][0]["errors"], ["RuntimeError"])
