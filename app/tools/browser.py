@@ -490,10 +490,15 @@ async def browser_session_open(
         summary.update({"session_id": session_id, "created_at_unix": record.created_at})
         return _format_browser_result(summary)
     except Exception:
-        await context.close()
-        await browser.close()
-        await playwright.stop()
         state.browser_sessions.pop(session_id, None)
+        cleanup_error: Exception | None = None
+        for cleanup in (context.close, browser.close, playwright.stop):
+            try:
+                await cleanup()
+            except Exception as exc:
+                cleanup_error = cleanup_error or exc
+        if cleanup_error is not None:
+            raise cleanup_error from None
         raise
 
 
@@ -524,9 +529,14 @@ async def browser_session_close(session_id: str) -> str:
     authorize_tool("browser_session_close")
     record = _get_browser_session(session_id)
     session_state().browser_sessions.pop(session_id, None)
-    await record.context.close()
-    await record.browser.close()
-    await record.playwright.stop()
+    cleanup_error: Exception | None = None
+    for cleanup in (record.context.close, record.browser.close, record.playwright.stop):
+        try:
+            await cleanup()
+        except Exception as exc:
+            cleanup_error = cleanup_error or exc
+    if cleanup_error is not None:
+        raise cleanup_error
     return f"Closed browser session: {session_id}"
 
 

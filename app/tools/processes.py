@@ -270,10 +270,12 @@ def start_process_advanced(
     if process_id in state.processes:
         raise ValueError(f"Process id already exists: {process_id}")
     working_dir = resolve_path(cwd)
+    command_env = _command_environment(environment, secret_refs)
+    redactions = tuple(command_env[name] for name in secret_refs or [] if name in command_env)
     process = subprocess.Popen(
         argv,
         cwd=working_dir,
-        env=_command_environment(environment, secret_refs),
+        env=command_env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -281,7 +283,13 @@ def start_process_advanced(
         bufsize=1,
         start_new_session=True,
     )
-    record = ProcessRecord(command=shlex.join(argv), cwd=working_dir, process=process, started_at=time.time())
+    record = ProcessRecord(
+        command=shlex.join(argv),
+        cwd=working_dir,
+        process=process,
+        started_at=time.time(),
+        redactions=redactions,
+    )
     with PROCESS_LOCK:
         state.processes[process_id] = record
     threading.Thread(
