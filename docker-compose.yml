@@ -21,6 +21,12 @@ services:
       AGENT_POLICY_PATH: /config/agent-policy.md
       SELF_IMPROVEMENT_WORKSPACE: ${SELF_IMPROVEMENT_WORKSPACE:-agent-mcp}
       PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+      MAX_PROCESSES_PER_USER: ${MAX_PROCESSES_PER_USER:-32}
+      MAX_BROWSER_SESSIONS_PER_USER: ${MAX_BROWSER_SESSIONS_PER_USER:-12}
+      PROCESS_IDLE_TTL_SECONDS: ${PROCESS_IDLE_TTL_SECONDS:-14400}
+      BROWSER_IDLE_TTL_SECONDS: ${BROWSER_IDLE_TTL_SECONDS:-7200}
+      FINISHED_PROCESS_RETENTION_SECONDS: ${FINISHED_PROCESS_RETENTION_SECONDS:-3600}
+      RESOURCE_CLEANUP_INTERVAL_SECONDS: ${RESOURCE_CLEANUP_INTERVAL_SECONDS:-60}
     volumes:
       - ${WORKSPACES_DIR:-./workspaces}:/workspaces
       - ./config:/config:ro
@@ -30,6 +36,13 @@ services:
       - "8080"
     ports:
       - "127.0.0.1:8081:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 15s
 
   postgres:
     image: postgres:16-alpine
