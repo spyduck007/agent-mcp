@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+from pathlib import Path
 from typing import Any
 
 from app.core import (
     MAX_OUTPUT,
+    WORKSPACE_ROOT,
     _command_environment,
     _format_browser_result,
     _run_argv,
@@ -25,10 +28,71 @@ def _container_name(name: str) -> str:
     return name
 
 
+def _configured_host_path(path: Path) -> Path | None:
+    configured_root = os.getenv("HOST_WORKSPACES_ROOT", "").strip()
+    if not configured_root:
+        return None
+    try:
+        relative = path.relative_to(WORKSPACE_ROOT)
+    except ValueError:
+        return None
+    return Path(configured_root).expanduser() / relative
+
+
+def _current_container_mounts() -> list[dict[str, Any]]:
+    container_id = os.getenv("HOSTNAME", "").strip()
+    if not container_id:
+        raise RuntimeError("Cannot determine the MCP container id from HOSTNAME")
+    result = _run_argv(
+        ["docker", "inspect", "--format", "{{json .Mounts}}", container_id],
+        session_state().current_project,
+        30,
+    )
+    if result["exit_code"] != 0:
+        detail = result.get("stderr") or result.get("stdout") or "docker inspect failed"
+        raise RuntimeError(f"Cannot inspect MCP container mounts: {detail.strip()}")
+    try:
+        mounts = json.loads(result.get("stdout", ""))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Docker returned invalid mount metadata for the MCP container") from exc
+    if not isinstance(mounts, list):
+        raise RuntimeError("Docker returned unexpected mount metadata for the MCP container")
+    return [mount for mount in mounts if isinstance(mount, dict)]
+
+
+def _host_path_for_container_path(path: Path) -> Path:
+    resolved = path.resolve()
+    configured = _configured_host_path(resolved)
+    if configured is not None:
+        return configured
+
+    candidates: list[tuple[int, Path]] = []
+    for mount in _current_container_mounts():
+        destination_value = mount.get("Destination")
+        source_value = mount.get("Source")
+        if not isinstance(destination_value, str) or not isinstance(source_value, str):
+            continue
+        destination = Path(destination_value).resolve()
+        try:
+            relative = resolved.relative_to(destination)
+        except ValueError:
+            continue
+        candidates.append((len(destination.parts), Path(source_value) / relative))
+
+    if candidates:
+        return max(candidates, key=lambda item: item[0])[1]
+
+    raise RuntimeError(
+        f"Cannot translate container path {resolved} to a host path for Docker. "
+        "Set HOST_WORKSPACES_ROOT to the absolute host directory mounted at WORKSPACE_ROOT."
+    )
+
+
 def _mount_spec(source: str, destination: str, read_only: bool) -> str:
     resolved = resolve_path(source)
+    host_source = _host_path_for_container_path(resolved)
     suffix = ":ro" if read_only else ""
-    return f"{resolved}:{destination}{suffix}"
+    return f"{host_source}:{destination}{suffix}"
 
 
 @mcp.tool()
@@ -56,6 +120,7 @@ def worker_run(
     if not image.strip():
         raise ValueError("image is required")
     working_dir = resolve_path(cwd)
+    host_working_dir = _host_path_for_container_path(working_dir)
     command = ["docker", "run"]
     if remove and not detach:
         command.append("--rm")
@@ -71,7 +136,7 @@ def worker_run(
         command.extend(["--network", network])
     if gpus:
         command.extend(["--gpus", gpus])
-    command.extend(["--volume", f"{working_dir}:{workspace_destination}", "--workdir", workspace_destination])
+    command.extend(["--volume", f"{host_working_dir}:{workspace_destination}", "--workdir", workspace_destination])
     for volume in volumes or []:
         source = str(volume.get("source", ""))
         destination = str(volume.get("destination", ""))
