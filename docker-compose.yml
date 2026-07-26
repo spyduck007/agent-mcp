@@ -27,6 +27,7 @@ services:
       KEYCLOAK_REALM: agent-mcp
       OIDC_CLIENT_ID: chatgpt-agent-mcp
       WORKSPACE_ROOT: /workspaces
+      HOST_WORKSPACES_ROOT: ${HOST_WORKSPACES_ROOT:-}
       WORKSPACE_MAP_PATH: /config/workspaces.json
       SECRET_REFS_PATH: /config/secrets.json
       SNAPSHOT_ROOT: /snapshots
