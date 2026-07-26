@@ -558,3 +558,61 @@ The MCP endpoint may return a protocol-specific response depending on the reques
 ## License
 
 No license file is included yet. Add one before publishing this project for reuse by other people or organizations.
+
+## Unrestricted single-user runtime
+
+The default Compose service now runs as root with `privileged: true`, all Linux capabilities, unconfined seccomp/AppArmor, a 4 GB shared-memory segment, the Docker socket, and the host root mounted at `/host`. Set `HOST_ROOT` to a narrower directory if desired. `UNRESTRICTED_FILESYSTEM=true` allows file tools to operate outside assigned project roots, including `/root`, `/opt/agent-tools`, and `/host`.
+
+Runtime state is separated into three layers:
+
+- `/opt/mcp-venv` is the immutable MCP control-plane environment.
+- `/opt/agent-tools` is a persistent volume for agent-installed binaries and a Python virtual environment.
+- `/root` is a persistent volume for Git, GitHub CLI, SSH, Cargo, Go, npm, browser, and other user-level state.
+
+The container entrypoint configures every Git repository as a safe directory and runs `gh auth setup-git` whenever the persistent root profile is authenticated. After the first deployment, authenticate once inside the container with:
+
+```bash
+docker compose --profile production exec mcp-server gh auth login
+```
+
+That authentication survives later container rebuilds through the `agent_root_home` volume.
+
+### Interactive terminals
+
+PTY-backed tools provide persistent interactive shells, REPLs, debuggers, SSH sessions, database clients, and installers:
+
+- `terminal_open`
+- `terminal_read`
+- `terminal_write`
+- `terminal_resize`
+- `terminal_signal`
+- `terminal_list`
+- `terminal_close`
+
+### Docker workers
+
+Heavy or conflicting toolchains can run in arbitrary disposable workers without mutating the MCP runtime:
+
+- `worker_run`
+- `worker_exec`
+- `worker_logs`
+- `worker_list`
+- `worker_stop`
+- `worker_remove`
+- `worker_copy`
+- `worker_pull`
+- `worker_build`
+
+Workers support privilege mode, custom networks, GPUs, devices, ports, workspace and additional mounts, environment variables, and named secret references.
+
+### Persistent environment profiles
+
+`environment_profile_set`, `environment_profile_list`, `environment_profile_preview`, and `environment_profile_delete` store reusable command environments under the persistent root profile. Commands, background processes, and terminals can select a profile by name.
+
+### Package management
+
+The package tools support APT, persistent agent/project Python environments, npm, pnpm, Yarn, uv, pipx, Cargo, Go, RubyGems, Composer, and SDKMAN-compatible commands. `package_which` verifies the effective executable and version. Prefer the persistent agent environment or Docker workers over installing into `/opt/mcp-venv`.
+
+### Configurable limits
+
+Command timeouts, output bounds, file-read bounds, process/browser/terminal logs, session counts, and idle cleanup are environment-configurable. `COMMAND_TIMEOUT_MAX_SECONDS=0` disables the global command ceiling while individual calls may still provide a timeout.

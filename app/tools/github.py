@@ -81,3 +81,64 @@ def github_create_pull_request(
 
 
 TOOL_EXPORTS = ["github_push_branch", "github_create_pull_request"]
+
+
+@mcp.tool()
+def github_cli(args: list[str], cwd: str = ".", timeout_seconds: int = 3600) -> str:
+    """Run an arbitrary authenticated GitHub CLI command using the persistent root profile."""
+    authorize_tool("github_cli")
+    if not args or not all(isinstance(part, str) and part for part in args):
+        raise ValueError("args must contain one or more non-empty strings")
+    root = resolve_path(cwd)
+    return _json_result(_run_argv(["gh", *args], root, timeout_seconds))
+
+
+@mcp.tool()
+def github_clone(repository: str, destination: str, branch: str | None = None) -> str:
+    """Clone a GitHub repository into the workspace using gh authentication."""
+    authorize_tool("github_clone")
+    target = resolve_path(destination)
+    if target.exists() and any(target.iterdir()):
+        raise FileExistsError(f"Destination is not empty: {target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    argv = ["gh", "repo", "clone", repository, str(target)]
+    if branch:
+        argv.extend(["--", "--branch", branch])
+    return _json_result(_run_argv(argv, target.parent, 3600))
+
+
+@mcp.tool()
+def github_merge_pull_request(
+    repository: str,
+    pull_request: str,
+    method: str = "squash",
+    delete_branch: bool = True,
+) -> str:
+    """Merge a GitHub pull request using merge, squash, or rebase."""
+    authorize_tool("github_merge_pull_request")
+    if method not in {"merge", "squash", "rebase"}:
+        raise ValueError("method must be merge, squash, or rebase")
+    argv = ["gh", "pr", "merge", pull_request, f"--{method}", "--repo", repository]
+    if delete_branch:
+        argv.append("--delete-branch")
+    return _json_result(_run_argv(argv, resolve_path("."), 600))
+
+
+@mcp.tool()
+def github_workflow_run(
+    repository: str,
+    workflow: str,
+    ref: str | None = None,
+    fields: dict[str, str] | None = None,
+) -> str:
+    """Dispatch a GitHub Actions workflow."""
+    authorize_tool("github_workflow_run")
+    argv = ["gh", "workflow", "run", workflow, "--repo", repository]
+    if ref:
+        argv.extend(["--ref", ref])
+    for key, value in (fields or {}).items():
+        argv.extend(["--field", f"{key}={value}"])
+    return _json_result(_run_argv(argv, resolve_path("."), 300))
+
+
+TOOL_EXPORTS.extend(["github_cli", "github_clone", "github_merge_pull_request", "github_workflow_run"])

@@ -50,6 +50,13 @@ def _env_int(name: str, default: int) -> int:
         raise RuntimeError(f"{name} must be a non-negative integer") from exc
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 AUTH_MODE = os.getenv("AUTH_MODE", "required").lower()
 WORKSPACE_ROOT = Path(os.getenv("WORKSPACE_ROOT", "/workspaces")).resolve()
 WORKSPACE_MAP_PATH = Path(os.getenv("WORKSPACE_MAP_PATH", "/config/workspaces.json"))
@@ -179,15 +186,27 @@ AUDIT_ROOT = Path(os.getenv("AUDIT_ROOT", "/snapshots/audit")).resolve()
 MEMORY_ROOT = Path(os.getenv("MEMORY_ROOT", "/snapshots/memory")).resolve()
 AGENT_POLICY_PATH = Path(os.getenv("AGENT_POLICY_PATH", "/config/agent-policy.md"))
 SELF_IMPROVEMENT_WORKSPACE = os.getenv("SELF_IMPROVEMENT_WORKSPACE", "agent-mcp")
+COMMAND_HOME = Path(os.getenv("COMMAND_HOME", "/root")).resolve()
+TOOL_ROOT = Path(os.getenv("TOOL_ROOT", "/opt/agent-tools")).resolve()
+ENVIRONMENT_PROFILE_PATH = Path(
+    os.getenv("ENVIRONMENT_PROFILE_PATH", str(COMMAND_HOME / ".config/agent-mcp/environment-profiles.json"))
+).resolve()
+UNRESTRICTED_FILESYSTEM = _env_bool("UNRESTRICTED_FILESYSTEM", False)
 MAX_PROCESSES_PER_USER = _env_int("MAX_PROCESSES_PER_USER", 32)
 MAX_BROWSER_SESSIONS_PER_USER = _env_int("MAX_BROWSER_SESSIONS_PER_USER", 12)
+MAX_TERMINAL_SESSIONS_PER_USER = _env_int("MAX_TERMINAL_SESSIONS_PER_USER", 16)
 PROCESS_IDLE_TTL_SECONDS = _env_int("PROCESS_IDLE_TTL_SECONDS", 14400)
 BROWSER_IDLE_TTL_SECONDS = _env_int("BROWSER_IDLE_TTL_SECONDS", 7200)
+TERMINAL_IDLE_TTL_SECONDS = _env_int("TERMINAL_IDLE_TTL_SECONDS", 14400)
 FINISHED_PROCESS_RETENTION_SECONDS = _env_int("FINISHED_PROCESS_RETENTION_SECONDS", 3600)
 RESOURCE_CLEANUP_INTERVAL_SECONDS = _env_int("RESOURCE_CLEANUP_INTERVAL_SECONDS", 60)
-
-PROCESS_LOG_LIMIT = 5000
-BROWSER_LOG_LIMIT = 500
+PROCESS_LOG_LIMIT = _env_int("PROCESS_LOG_LIMIT", 50_000)
+BROWSER_LOG_LIMIT = _env_int("BROWSER_LOG_LIMIT", 5_000)
+TERMINAL_LOG_LIMIT = _env_int("TERMINAL_LOG_LIMIT", 2_000_000)
+MAX_READ_BYTES = _env_int("MAX_READ_BYTES", 20_000_000)
+MAX_OUTPUT = _env_int("MAX_OUTPUT", 1_000_000)
+DEFAULT_TIMEOUT_SECONDS = _env_int("DEFAULT_TIMEOUT_SECONDS", 30)
+COMMAND_TIMEOUT_MAX_SECONDS = _env_int("COMMAND_TIMEOUT_MAX_SECONDS", 3600)
 
 
 @dataclass
@@ -226,16 +245,14 @@ class UserSessionState:
     current_project: Path
     processes: dict[str, ProcessRecord] = field(default_factory=dict)
     browser_sessions: dict[str, BrowserSessionRecord] = field(default_factory=dict)
+    terminals: dict[str, Any] = field(default_factory=dict)
     command_history: list[str] = field(default_factory=list)
 
 
 SESSIONS: dict[str, UserSessionState] = {}
 SESSION_LOCK = threading.RLock()
 PROCESS_LOCK = threading.Lock()
-
-MAX_READ_BYTES = 500_000
-MAX_OUTPUT = 80_000
-DEFAULT_TIMEOUT_SECONDS = 30
+TERMINAL_LOCK = threading.Lock()
 
 
 def _workspace_map() -> dict[str, list[Path]]:
@@ -359,6 +376,10 @@ TOOL_SCOPE_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "git_status": ("command:run", "workspace:read"),
     "git_worktree": ("command:run", "workspace:read", "workspace:write"),
     "github_create_pull_request": ("github:write", "secrets:use"),
+    "github_cli": ("github:write", "command:run", "workspace:read"),
+    "github_clone": ("github:write", "command:run", "workspace:read", "workspace:write"),
+    "github_merge_pull_request": ("github:write", "command:run"),
+    "github_workflow_run": ("github:write", "command:run"),
     "github_push_branch": ("github:write", "secrets:use", "workspace:read", "workspace:write"),
     "http_download": ("network:fetch", "workspace:read", "workspace:write"),
     "http_request": ("network:fetch",),
@@ -374,6 +395,9 @@ TOOL_SCOPE_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "list_snapshots": ("workspace:read",),
     "move_path": ("workspace:read", "workspace:write"),
     "open_project": ("workspace:read",),
+    "package_install": ("admin:install", "command:run", "workspace:read", "workspace:write"),
+    "package_remove": ("admin:install", "command:run", "workspace:read", "workspace:write"),
+    "package_which": ("command:run",),
     "port_owner": ("command:run",),
     "project_checkpoint": ("workspace:read", "workspace:write"),
     "project_context": ("workspace:read",),
@@ -408,6 +432,26 @@ TOOL_SCOPE_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "wait_for_process_output": ("command:run",),
     "write_binary_file": ("workspace:read", "workspace:write"),
     "write_file": ("workspace:read", "workspace:write"),
+    "terminal_open": ("command:run", "workspace:read"),
+    "terminal_list": ("command:run",),
+    "terminal_read": ("command:run",),
+    "terminal_write": ("command:run",),
+    "terminal_resize": ("command:run",),
+    "terminal_signal": ("command:run",),
+    "terminal_close": ("command:run",),
+    "environment_profile_list": ("command:run",),
+    "environment_profile_set": ("command:run", "workspace:write"),
+    "environment_profile_delete": ("command:run", "workspace:write"),
+    "environment_profile_preview": ("command:run",),
+    "worker_run": ("command:run", "deploy:run", "workspace:read"),
+    "worker_list": ("command:run", "deploy:run"),
+    "worker_exec": ("command:run", "deploy:run"),
+    "worker_logs": ("command:run", "deploy:run"),
+    "worker_stop": ("command:run", "deploy:run"),
+    "worker_remove": ("command:run", "deploy:run"),
+    "worker_copy": ("command:run", "deploy:run", "workspace:read", "workspace:write"),
+    "worker_pull": ("command:run", "deploy:run"),
+    "worker_build": ("command:run", "deploy:run", "workspace:read"),
 }
 
 
@@ -505,7 +549,7 @@ def resolve_path(path: str = ".") -> Path:
         target = (state.current_project / raw).resolve()
 
     roots = _workspace_map().get(state.subject, [])
-    if not _is_allowed_path(target, roots):
+    if not UNRESTRICTED_FILESYSTEM and not _is_allowed_path(target, roots):
         raise PermissionError("Path is outside the assigned workspace")
 
     return target
@@ -514,10 +558,8 @@ def resolve_path(path: str = ".") -> Path:
 def shell(command: str, cwd: str = ".", timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS) -> str:
     require_scope("command:run")
     working_dir = resolve_path(cwd)
-    timeout = min(max(timeout_seconds, 1), 300)
-
-    env = os.environ.copy()
-    env["HOME"] = str(session_state().current_project)
+    timeout = _command_timeout(timeout_seconds)
+    env = _command_environment()
 
     state = session_state()
     state.command_history.append(f"[{state.current_project_name}] {working_dir}$ {command}")
@@ -1124,8 +1166,19 @@ def _resource_counts() -> dict[str, int]:
         states = list(SESSIONS.values())
     processes = sum(len(state.processes) for state in states)
     browsers = sum(len(state.browser_sessions) for state in states)
+    terminals = sum(len(state.terminals) for state in states)
     running = sum(1 for state in states for record in state.processes.values() if record.process.poll() is None)
-    return {"sessions": len(states), "processes": processes, "running_processes": running, "browser_sessions": browsers}
+    running_terminals = sum(
+        1 for state in states for record in state.terminals.values() if record.process.poll() is None
+    )
+    return {
+        "sessions": len(states),
+        "processes": processes,
+        "running_processes": running,
+        "browser_sessions": browsers,
+        "terminal_sessions": terminals,
+        "running_terminals": running_terminals,
+    }
 
 
 def _stop_process_record(record: ProcessRecord) -> None:
@@ -1156,6 +1209,25 @@ async def _close_browser_record(record: BrowserSessionRecord) -> list[str]:
     return errors
 
 
+def _close_terminal_record(record: Any) -> list[str]:
+    errors: list[str] = []
+    try:
+        if record.process.poll() is None:
+            os.killpg(record.process.pid, 15)
+            try:
+                record.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(record.process.pid, 9)
+                record.process.wait(timeout=5)
+    except Exception as exc:
+        errors.append(type(exc).__name__)
+    try:
+        os.close(record.master_fd)
+    except OSError:
+        pass
+    return errors
+
+
 async def _cleanup_state_resources(
     state: UserSessionState, *, now: float | None = None, force: bool = False
 ) -> dict[str, Any]:
@@ -1163,6 +1235,7 @@ async def _cleanup_state_resources(
     removed_processes: list[str] = []
     stopped_processes: list[str] = []
     closed_browsers: list[str] = []
+    closed_terminals: list[str] = []
     cleanup_errors: list[dict[str, Any]] = []
 
     with PROCESS_LOCK:
@@ -1199,14 +1272,25 @@ async def _cleanup_state_resources(
                 cleanup_errors.append({"type": "browser", "session_id": session_id, "errors": errors})
             closed_browsers.append(session_id)
 
+    terminal_items = list(state.terminals.items())
+    for session_id, record in terminal_items:
+        stale = TERMINAL_IDLE_TTL_SECONDS > 0 and current - record.last_activity_at >= TERMINAL_IDLE_TTL_SECONDS
+        if force or stale:
+            state.terminals.pop(session_id, None)
+            errors = _close_terminal_record(record)
+            if errors:
+                cleanup_errors.append({"type": "terminal", "session_id": session_id, "errors": errors})
+            closed_terminals.append(session_id)
+
     result = {
         "subject": state.subject,
         "removed_processes": removed_processes,
         "stopped_processes": stopped_processes,
         "closed_browser_sessions": closed_browsers,
+        "closed_terminal_sessions": closed_terminals,
         "errors": cleanup_errors,
     }
-    if removed_processes or closed_browsers or cleanup_errors:
+    if removed_processes or closed_browsers or closed_terminals or cleanup_errors:
         _audit_state(
             state,
             "resource_cleanup",
@@ -1215,6 +1299,7 @@ async def _cleanup_state_resources(
                 "removed_process_count": len(removed_processes),
                 "stopped_process_count": len(stopped_processes),
                 "closed_browser_count": len(closed_browsers),
+                "closed_terminal_count": len(closed_terminals),
                 "error_count": len(cleanup_errors),
             },
         )
@@ -1265,7 +1350,14 @@ async def health_check(_request: Request) -> JSONResponse:
 def _run_argv(argv: list[str], cwd: Path, timeout_seconds: int = 300) -> dict[str, Any]:
     """Run a fixed argv command and return bounded structured output."""
     try:
-        result = subprocess.run(argv, cwd=cwd, text=True, capture_output=True, timeout=timeout_seconds)
+        result = subprocess.run(
+            argv,
+            cwd=cwd,
+            env=_command_environment(),
+            text=True,
+            capture_output=True,
+            timeout=_command_timeout(timeout_seconds),
+        )
         return {
             "argv": argv,
             "exit_code": result.returncode,
@@ -1375,9 +1467,57 @@ def _secret_values(names: list[str]) -> dict[str, str]:
     return {name: values[name] for name in names}
 
 
-def _command_environment(environment: dict[str, str] | None, secret_refs: list[str] | None) -> dict[str, str]:
+def _environment_profiles() -> dict[str, dict[str, str]]:
+    if not ENVIRONMENT_PROFILE_PATH.exists():
+        return {}
+    data = json.loads(ENVIRONMENT_PROFILE_PATH.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("Environment profile file must contain a JSON object")
+    result: dict[str, dict[str, str]] = {}
+    for profile_name, values in data.items():
+        if isinstance(profile_name, str) and isinstance(values, dict):
+            result[profile_name] = {str(name): str(value) for name, value in values.items()}
+    return result
+
+
+def _save_environment_profiles(profiles: dict[str, dict[str, str]]) -> None:
+    ENVIRONMENT_PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = ENVIRONMENT_PROFILE_PATH.with_suffix(f".tmp-{uuid.uuid4().hex}")
+    temporary.write_text(json.dumps(profiles, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(ENVIRONMENT_PROFILE_PATH)
+
+
+def _command_timeout(timeout_seconds: int | None) -> int | None:
+    if timeout_seconds is None or timeout_seconds <= 0:
+        return None
+    if COMMAND_TIMEOUT_MAX_SECONDS <= 0:
+        return timeout_seconds
+    return min(timeout_seconds, COMMAND_TIMEOUT_MAX_SECONDS)
+
+
+def _command_environment(
+    environment: dict[str, str] | None = None,
+    secret_refs: list[str] | None = None,
+    profile: str | None = None,
+) -> dict[str, str]:
     env = os.environ.copy()
-    env["HOME"] = str(session_state().current_project)
+    env["HOME"] = str(COMMAND_HOME)
+    env["XDG_CONFIG_HOME"] = str(COMMAND_HOME / ".config")
+    env["XDG_CACHE_HOME"] = str(COMMAND_HOME / ".cache")
+    env["XDG_DATA_HOME"] = str(COMMAND_HOME / ".local/share")
+    path_prefix = [
+        str(TOOL_ROOT / "bin"),
+        str(TOOL_ROOT / "venv/bin"),
+        str(COMMAND_HOME / ".local/bin"),
+        str(COMMAND_HOME / ".cargo/bin"),
+        str(COMMAND_HOME / "go/bin"),
+    ]
+    env["PATH"] = os.pathsep.join(path_prefix + [env.get("PATH", "")])
+    if profile:
+        profiles = _environment_profiles()
+        if profile not in profiles:
+            raise KeyError(f"Unknown environment profile: {profile}")
+        env.update(profiles[profile])
     for name, value in (environment or {}).items():
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
             raise ValueError(f"Invalid environment variable name: {name}")

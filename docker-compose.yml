@@ -2,6 +2,23 @@ services:
   mcp-server:
     build: .
     restart: unless-stopped
+    init: true
+    privileged: true
+    cap_add:
+      - ALL
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+    shm_size: ${MCP_SHM_SIZE:-4gb}
+    stdin_open: true
+    tty: true
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+      memlock:
+        soft: -1
+        hard: -1
     environment:
       AUTH_MODE: required
       MCP_HOST: 0.0.0.0
@@ -18,6 +35,17 @@ services:
       AGENT_POLICY_PATH: /config/agent-policy.md
       SELF_IMPROVEMENT_WORKSPACE: ${SELF_IMPROVEMENT_WORKSPACE:-agent-mcp}
       PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+      COMMAND_HOME: /root
+      TOOL_ROOT: /opt/agent-tools
+      UNRESTRICTED_FILESYSTEM: ${UNRESTRICTED_FILESYSTEM:-true}
+      COMMAND_TIMEOUT_MAX_SECONDS: ${COMMAND_TIMEOUT_MAX_SECONDS:-0}
+      MAX_READ_BYTES: ${MAX_READ_BYTES:-20000000}
+      MAX_OUTPUT: ${MAX_OUTPUT:-1000000}
+      PROCESS_LOG_LIMIT: ${PROCESS_LOG_LIMIT:-50000}
+      BROWSER_LOG_LIMIT: ${BROWSER_LOG_LIMIT:-5000}
+      TERMINAL_LOG_LIMIT: ${TERMINAL_LOG_LIMIT:-2000000}
+      MAX_TERMINAL_SESSIONS_PER_USER: ${MAX_TERMINAL_SESSIONS_PER_USER:-16}
+      TERMINAL_IDLE_TTL_SECONDS: ${TERMINAL_IDLE_TTL_SECONDS:-14400}
       MAX_PROCESSES_PER_USER: ${MAX_PROCESSES_PER_USER:-32}
       MAX_BROWSER_SESSIONS_PER_USER: ${MAX_BROWSER_SESSIONS_PER_USER:-12}
       PROCESS_IDLE_TTL_SECONDS: ${PROCESS_IDLE_TTL_SECONDS:-14400}
@@ -29,6 +57,10 @@ services:
       - ./config:/config:ro
       - ./snapshots:/snapshots
       - /var/run/docker.sock:/var/run/docker.sock
+      - ${HOST_ROOT:-/}:/host
+      - agent_root_home:/root
+      - agent_tools:/opt/agent-tools
+      - apt_cache:/var/cache/apt
     expose:
       - "8080"
     ports:
@@ -99,3 +131,6 @@ services:
 
 volumes:
   keycloak_postgres:
+  agent_root_home:
+  agent_tools:
+  apt_cache:
