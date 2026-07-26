@@ -3,6 +3,7 @@
 import importlib
 import json
 import os
+import sys
 import tempfile
 import time
 import unittest
@@ -20,10 +21,12 @@ class UnrestrictedPowerTests(unittest.TestCase):
         snapshots.mkdir()
         self.command_home = root / "root-home"
         self.tool_root = root / "tools"
+        self.host_workspaces_root = root / "host-workspaces"
         os.environ.update(
             {
                 "AUTH_MODE": "disabled",
                 "WORKSPACE_ROOT": str(self.workspace),
+                "HOST_WORKSPACES_ROOT": str(self.host_workspaces_root),
                 "WORKSPACE_MAP_PATH": str(root / "missing-workspaces.json"),
                 "SNAPSHOT_ROOT": str(snapshots),
                 "AUDIT_ROOT": str(snapshots / "audit"),
@@ -99,7 +102,28 @@ class UnrestrictedPowerTests(unittest.TestCase):
         self.assertIn("--privileged", argv)
         self.assertIn("host", argv)
         self.assertIn("all", argv)
+        self.assertIn(f"{self.host_workspaces_root}:/workspace", argv)
         self.assertEqual(result["exit_code"], 0)
+
+    def test_worker_mount_auto_detection_uses_longest_matching_mount(self) -> None:
+        with mock.patch.dict(os.environ, {"HOST_WORKSPACES_ROOT": ""}, clear=False), mock.patch(
+            "app.tools.workers._current_container_mounts",
+            return_value=[
+                {"Destination": "/workspaces", "Source": "/srv/workspaces"},
+                {"Destination": "/workspaces/local-dev", "Source": "/srv/specific"},
+            ],
+        ):
+            translated = self.server.worker_run.__module__
+            from app.tools.workers import _host_path_for_container_path
+
+            self.assertEqual(_host_path_for_container_path(self.workspace), Path("/srv/specific"))
+            self.assertEqual(translated, "app.tools.workers")
+
+    def test_python_verification_uses_mcp_interpreter(self) -> None:
+        from app.tools.project import _verification_argv
+
+        self.assertEqual(_verification_argv(["python", "-m", "pytest"])[0], sys.executable)
+        self.assertEqual(_verification_argv(["npm", "run", "test"]), ["npm", "run", "test"])
 
     def test_chatgpt_profile_stays_below_client_limit_and_keeps_escape_hatches(self) -> None:
         state = self.server.TOOL_PROFILE_STATE
