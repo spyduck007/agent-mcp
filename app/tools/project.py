@@ -34,7 +34,10 @@ from app.core import (
 def _verification_argv(command: list[str]) -> list[str]:
     """Run Python verification with the immutable MCP interpreter, not the mutable agent venv."""
     if command and command[0] == "python":
-        return [sys.executable, *command[1:]]
+        rewritten = [sys.executable, *command[1:]]
+        if command[1:3] == ["-m", "pyright"]:
+            rewritten.extend(["--pythonpath", sys.executable])
+        return rewritten
     return command
 
 
