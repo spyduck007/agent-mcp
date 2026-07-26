@@ -11,6 +11,8 @@ import importlib
 import sys
 from types import ModuleType
 
+from app.tool_profiles import apply_tool_profile
+
 _previous_core = globals().get("_core")
 if isinstance(_previous_core, ModuleType):
     _core = importlib.reload(_previous_core)
@@ -45,6 +47,7 @@ for _module_name in _TOOL_MODULE_NAMES:
     _TOOL_MODULES.append(_module)
 
 _TOOL_EXPORTS = {name: getattr(module, name) for module in _TOOL_MODULES for name in module.TOOL_EXPORTS}
+TOOL_PROFILE_STATE = apply_tool_profile(_core.mcp, set(_TOOL_EXPORTS))
 
 # The facade intentionally mirrors the historic module-level API.
 for _name in _core.__all__:

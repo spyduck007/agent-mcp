@@ -616,3 +616,13 @@ The package tools support APT, persistent agent/project Python environments, npm
 ### Configurable limits
 
 Command timeouts, output bounds, file-read bounds, process/browser/terminal logs, session counts, and idle cleanup are environment-configurable. `COMMAND_TIMEOUT_MAX_SECONDS=0` disables the global command ceiling while individual calls may still provide a timeout.
+
+### Tool exposure profiles
+
+The server imports every implementation but only publishes the tools selected by `MCP_TOOL_PROFILE`:
+
+- `chatgpt` is the default curated high-power profile and stays below ChatGPT's 120-tool ceiling.
+- `minimal` exposes a compact coding and operations surface.
+- `full` publishes every implementation for development clients when `MCP_MAX_EXPOSED_TOOLS=0` or a sufficiently high limit is configured.
+
+`MCP_MAX_EXPOSED_TOOLS` makes the server fail fast instead of silently allowing a client to truncate the list. `MCP_TOOL_INCLUDE` and `MCP_TOOL_EXCLUDE` accept comma-separated tool names for small deployment-specific adjustments. Hidden wrappers remain importable internally, while the curated profile retains universal escape hatches through `run_command_advanced`, `github_cli`, `package_install`, PTY terminals, and Docker workers.

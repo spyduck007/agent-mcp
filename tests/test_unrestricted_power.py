@@ -32,6 +32,10 @@ class UnrestrictedPowerTests(unittest.TestCase):
                 "TOOL_ROOT": str(self.tool_root),
                 "ENVIRONMENT_PROFILE_PATH": str(self.command_home / "profiles.json"),
                 "UNRESTRICTED_FILESYSTEM": "false",
+                "MCP_TOOL_PROFILE": "chatgpt",
+                "MCP_MAX_EXPOSED_TOOLS": "100",
+                "MCP_TOOL_INCLUDE": "",
+                "MCP_TOOL_EXCLUDE": "",
             }
         )
         import app.server
@@ -96,6 +100,50 @@ class UnrestrictedPowerTests(unittest.TestCase):
         self.assertIn("host", argv)
         self.assertIn("all", argv)
         self.assertEqual(result["exit_code"], 0)
+
+    def test_chatgpt_profile_stays_below_client_limit_and_keeps_escape_hatches(self) -> None:
+        state = self.server.TOOL_PROFILE_STATE
+        self.assertEqual(state.profile, "chatgpt")
+        self.assertLessEqual(len(state.exposed_tools), 100)
+        self.assertLess(len(state.exposed_tools), len(state.all_tools))
+        for name in {
+            "run_command_advanced",
+            "github_cli",
+            "package_install",
+            "terminal_open",
+            "worker_run",
+            "project_context",
+        }:
+            self.assertIn(name, state.exposed_tools)
+
+    def test_hidden_tools_remain_python_callable(self) -> None:
+        self.assertIn("git_blame", self.server.TOOL_PROFILE_STATE.hidden_tools)
+        self.assertTrue(callable(self.server.git_blame))
+        self.assertIn("worker_build", self.server.TOOL_PROFILE_STATE.hidden_tools)
+        self.assertTrue(callable(self.server.worker_build))
+
+    def test_full_profile_can_publish_every_tool_when_limit_disabled(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"MCP_TOOL_PROFILE": "full", "MCP_MAX_EXPOSED_TOOLS": "0"},
+            clear=False,
+        ):
+            import app.tool_profiles
+
+            state = app.tool_profiles.resolve_tool_profile(self.server.TOOL_PROFILE_STATE.all_tools)
+        self.assertEqual(state.profile, "full")
+        self.assertEqual(state.exposed_tools, state.all_tools)
+
+    def test_profile_limit_fails_fast(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"MCP_TOOL_PROFILE": "chatgpt", "MCP_MAX_EXPOSED_TOOLS": "10"},
+            clear=False,
+        ):
+            import app.tool_profiles
+
+            with self.assertRaisesRegex(RuntimeError, "exceeding MCP_MAX_EXPOSED_TOOLS"):
+                app.tool_profiles.resolve_tool_profile(self.server.TOOL_PROFILE_STATE.all_tools)
 
 
 if __name__ == "__main__":

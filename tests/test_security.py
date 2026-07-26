@@ -25,6 +25,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 "SNAPSHOT_ROOT": str(self.snapshots),
                 "AUDIT_ROOT": str(self.snapshots / "audit"),
                 "MEMORY_ROOT": str(self.snapshots / "memory"),
+                "UNRESTRICTED_FILESYSTEM": "false",
             }
         )
         import app.server
