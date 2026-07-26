@@ -29,6 +29,7 @@ class FileToolHardeningTests(unittest.TestCase):
                 "SNAPSHOT_ROOT": str(snapshots),
                 "AUDIT_ROOT": str(snapshots / "audit"),
                 "MEMORY_ROOT": str(snapshots / "memory"),
+                "UNRESTRICTED_FILESYSTEM": "false",
             }
         )
         import app.server
