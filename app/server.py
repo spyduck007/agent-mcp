@@ -31,6 +31,9 @@ _TOOL_MODULE_NAMES = [
     "app.tools.processes",
     "app.tools.project",
     "app.tools.snapshots",
+    "app.tools.terminal",
+    "app.tools.workers",
+    "app.tools.environment",
     "app.tools.workspaces",
 ]
 _TOOL_MODULES: list[ModuleType] = []

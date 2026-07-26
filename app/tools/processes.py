@@ -46,8 +46,7 @@ def start_process(command: str, cwd: str = ".", name: str | None = None) -> str:
             f"Process limit reached ({MAX_PROCESSES_PER_USER}); raise MAX_PROCESSES_PER_USER or set it to 0"
         )
 
-    env = os.environ.copy()
-    env["HOME"] = str(state.current_project)
+    env = _command_environment()
 
     state.command_history.append(f"[{state.current_project_name}] {working_dir}$ {command}  # process={process_id}")
 
@@ -269,6 +268,7 @@ def start_process_advanced(
     environment: dict[str, str] | None = None,
     secret_refs: list[str] | None = None,
     allow_stdin: bool = False,
+    profile: str | None = None,
 ) -> str:
     """Start an argv background process without shell parsing, with controlled environment, optional named secrets, and optional stdin forwarding."""
     authorize_tool("start_process_advanced")
@@ -285,7 +285,7 @@ def start_process_advanced(
             f"Process limit reached ({MAX_PROCESSES_PER_USER}); raise MAX_PROCESSES_PER_USER or set it to 0"
         )
     working_dir = resolve_path(cwd)
-    command_env = _command_environment(environment, secret_refs)
+    command_env = _command_environment(environment, secret_refs, profile)
     redactions = tuple(command_env[name] for name in secret_refs or [] if name in command_env)
     process = subprocess.Popen(
         argv,

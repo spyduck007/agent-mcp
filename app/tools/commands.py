@@ -4,6 +4,7 @@ from app.core import (
     DEFAULT_TIMEOUT_SECONDS,
     MAX_OUTPUT,
     _command_environment,
+    _command_timeout,
     _format_browser_result,
     _redact_text,
     authorize_tool,
@@ -38,6 +39,7 @@ def run_command_advanced(
     stdin: str | None = None,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     output_file: str | None = None,
+    profile: str | None = None,
 ) -> str:
     """Run an argv command without shell parsing. Supports controlled environment values, named secret injection, stdin, timeout, and optional captured-output file. Secret values are never returned by this tool."""
     authorize_tool("run_command_advanced")
@@ -45,10 +47,10 @@ def run_command_advanced(
     if not argv or not all(isinstance(part, str) and part for part in argv):
         raise ValueError("argv must contain one or more non-empty strings")
     working_dir = resolve_path(cwd)
-    timeout = min(max(timeout_seconds, 1), 300)
+    timeout = _command_timeout(timeout_seconds)
     state = session_state()
     state.command_history.append(f"[{state.current_project_name}] {working_dir}$ {shlex.join(argv)}")
-    command_env = _command_environment(environment, secret_refs)
+    command_env = _command_environment(environment, secret_refs, profile)
     redactions = [command_env[name] for name in secret_refs or [] if name in command_env]
     try:
         result = subprocess.run(
@@ -91,6 +93,7 @@ def run_command_advanced(
             "stderr": stderr[:MAX_OUTPUT],
             "output_file": output_path,
             "secret_refs_used": secret_refs or [],
+            "profile": profile,
         }
     )
 
