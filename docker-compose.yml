@@ -2,9 +2,6 @@ services:
   mcp-server:
     build: .
     restart: unless-stopped
-    user: "${PUID:-1000}:${PGID:-1000}"
-    group_add:
-      - "${DOCKER_GID:-983}"
     environment:
       AUTH_MODE: required
       MCP_HOST: 0.0.0.0
