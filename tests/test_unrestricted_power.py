@@ -125,6 +125,14 @@ class UnrestrictedPowerTests(unittest.TestCase):
         self.assertEqual(_verification_argv(["python", "-m", "pytest"])[0], sys.executable)
         self.assertEqual(_verification_argv(["npm", "run", "test"]), ["npm", "run", "test"])
 
+    def test_pyright_verification_receives_pythonpath(self) -> None:
+        from app.tools.project import _verification_argv
+
+        self.assertEqual(
+            _verification_argv(["python", "-m", "pyright"]),
+            [sys.executable, "-m", "pyright", "--pythonpath", sys.executable],
+        )
+
     def test_chatgpt_profile_stays_below_client_limit_and_keeps_escape_hatches(self) -> None:
         state = self.server.TOOL_PROFILE_STATE
         self.assertEqual(state.profile, "chatgpt")
