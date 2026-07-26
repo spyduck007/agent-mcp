@@ -1,5 +1,7 @@
 """MCP tools for the project capability group."""
 
+import sys
+
 from app.core import (
     AGENT_POLICY_PATH,
     AUDIT_ROOT,
@@ -27,6 +29,13 @@ from app.core import (
     time,
     uuid,
 )
+
+
+def _verification_argv(command: list[str]) -> list[str]:
+    """Run Python verification with the immutable MCP interpreter, not the mutable agent venv."""
+    if command and command[0] == "python":
+        return [sys.executable, *command[1:]]
+    return command
 
 
 @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
@@ -140,7 +149,7 @@ def project_verify(suites: list[str] | None = None, timeout_seconds: int = 300) 
         if not commands:
             results[suite] = {"status": "not_configured", "commands": []}
             continue
-        command_results = [_run_argv(command, root, timeout) for command in commands]
+        command_results = [_run_argv(_verification_argv(command), root, timeout) for command in commands]
         status = (
             "passed" if all(item["exit_code"] == 0 and not item["timed_out"] for item in command_results) else "failed"
         )
